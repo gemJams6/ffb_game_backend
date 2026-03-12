@@ -48,11 +48,15 @@ app.get("/api/leaderboard/daily", async (req, res) => {
   try {
     const now = new Date();
 
-    const startOfDay = new Date(now);
-    startOfDay.setHours(0, 0, 0, 0);
+    const chicagoNow = new Date(
+      now.toLocaleString("en-US", { timeZone: "America/Chicago" })
+    );
 
-    const endOfDay = new Date(now);
-    endOfDay.setHours(24, 0, 0, 0);
+    const startOfDay = new Date(chicagoNow);
+    startOfDay.setHours(0,0,0,0);
+
+    const endOfDay = new Date(chicagoNow);
+    endOfDay.setHours(24,0,0,0);
 
     const scores = await leaderboardCollection
       .find({
