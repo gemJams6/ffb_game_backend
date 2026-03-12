@@ -44,6 +44,34 @@ app.get("/api/leaderboard", async (req, res) => {
   }
 });
 
+app.get("/api/leaderboard/daily", async (req, res) => {
+  try {
+    const now = new Date();
+
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(now);
+    endOfDay.setHours(24, 0, 0, 0);
+
+    const scores = await leaderboardCollection
+      .find({
+        createdAt: {
+          $gte: startOfDay,
+          $lt: endOfDay
+        }
+      })
+      .sort({ score: -1, createdAt: 1 })
+      .limit(5)
+      .toArray();
+
+    res.json(scores);
+  } catch (error) {
+    console.error("Error loading daily leaderboard:", error);
+    res.status(500).json({ error: "Failed to load daily leaderboard" });
+  }
+});
+
 app.post("/api/leaderboard", async (req, res) => {
   try {
     const { name, score, submitted_at, roster } = req.body;
@@ -62,19 +90,45 @@ app.post("/api/leaderboard", async (req, res) => {
       return res.status(400).json({ error: "Name cannot be empty" });
     }
 
+    const createdAt = new Date();
+
     const newEntry = {
       name: cleanName,
       score: Number(score.toFixed(2)),
-      submitted_at: submitted_at || new Date().toISOString(),
+      submitted_at: submitted_at || createdAt.toISOString(),
       roster: Array.isArray(roster) ? roster : [],
-      createdAt: new Date()
+      createdAt
     };
 
     const result = await leaderboardCollection.insertOne(newEntry);
 
+    const overallHigherScores = await leaderboardCollection.countDocuments({
+      score: { $gt: newEntry.score }
+    });
+
+    const overallRank = overallHigherScores + 1;
+
+    const startOfDay = new Date(createdAt);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(createdAt);
+    endOfDay.setHours(24, 0, 0, 0);
+
+    const dailyHigherScores = await leaderboardCollection.countDocuments({
+      score: { $gt: newEntry.score },
+      createdAt: {
+        $gte: startOfDay,
+        $lt: endOfDay
+      }
+    });
+
+    const dailyRank = dailyHigherScores + 1;
+
     res.status(201).json({
       message: "Score submitted successfully",
-      id: result.insertedId
+      id: result.insertedId,
+      overallRank,
+      dailyRank
     });
   } catch (error) {
     console.error("Error saving score:", error);
