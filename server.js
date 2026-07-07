@@ -3,6 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion } = require("mongodb");
+const { getAvailability, saveAvailability } = require("./googleSheets");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -151,6 +152,37 @@ app.delete("/api/leaderboard", async (req, res) => {
   } catch (error) {
     console.error("Error clearing leaderboard:", error);
     res.status(500).json({ error: "Failed to clear leaderboard" });
+  }
+});
+
+app.get("/api/draft-availability", async (req, res) => {
+  try {
+    const data = await getAvailability();
+    res.json(data);
+  } catch (error) {
+    console.error("Error loading draft availability:", error);
+    res.status(500).json({ error: "Failed to load draft availability" });
+  }
+});
+
+app.post("/api/draft-availability", async (req, res) => {
+  try {
+    const { player, values, note } = req.body;
+
+    if (!player || typeof player !== "string") {
+      return res.status(400).json({ error: "Player is required" });
+    }
+
+    if (!Array.isArray(values)) {
+      return res.status(400).json({ error: "Values must be an array" });
+    }
+
+    await saveAvailability(player, values, typeof note === "string" ? note.slice(0, 500) : "");
+
+    res.json({ message: "Availability saved" });
+  } catch (error) {
+    console.error("Error saving draft availability:", error);
+    res.status(400).json({ error: error.message || "Failed to save draft availability" });
   }
 });
 
