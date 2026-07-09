@@ -1,13 +1,27 @@
-const crypto = require("crypto");
-
 let draftCollection;
 
 function initDraftCollection(db) {
   draftCollection = db.collection("draft_sessions");
 }
 
-function generateToken() {
-  return crypto.randomBytes(12).toString("hex");
+// Set once via the TEAM_PASSWORDS_JSON env var, e.g.
+// {"Dan":"eagles92","Grove":"...", ...} -- persistent across seasons/drafts,
+// unlike the old per-draft tokens. Parsed lazily so a malformed/missing env
+// var fails loudly at the point of use rather than crashing server startup.
+function getTeamPasswords() {
+  const raw = process.env.TEAM_PASSWORDS_JSON;
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error("TEAM_PASSWORDS_JSON is not valid JSON:", err.message);
+    return {};
+  }
+}
+
+function checkTeamPassword(team, password) {
+  const passwords = getTeamPasswords();
+  return Boolean(team) && Boolean(password) && passwords[team] === password;
 }
 
 function buildPickOrder(teamOrder, totalRounds) {
@@ -27,8 +41,6 @@ function fail(message, statusCode) {
   return err;
 }
 
-// Team tokens never leave the server except once, at creation time, in the
-// response the commissioner uses to build each team's private link.
 function toPublicSession(doc) {
   if (!doc) return null;
   return {
@@ -47,6 +59,13 @@ async function getCurrentSession() {
   return toPublicSession(doc);
 }
 
+function verifyTeamLogin({ team, password }) {
+  if (!checkTeamPassword(team, password)) {
+    throw fail("Incorrect team or password", 403);
+  }
+  return { ok: true };
+}
+
 async function createSession({ teamOrder, totalRounds, commissionerSecret }) {
   if (!process.env.COMMISSIONER_SECRET || commissionerSecret !== process.env.COMMISSIONER_SECRET) {
     throw fail("Invalid commissioner secret", 403);
@@ -59,18 +78,12 @@ async function createSession({ teamOrder, totalRounds, commissionerSecret }) {
   const rounds = Math.max(1, Math.min(25, Number(totalRounds) || 16));
   const pickOrder = buildPickOrder(teamOrder, rounds);
 
-  const teamTokens = {};
-  teamOrder.forEach((team) => {
-    teamTokens[team] = generateToken();
-  });
-
   const doc = {
     teamOrder,
     totalRounds: rounds,
     pickOrder,
     picks: new Array(pickOrder.length).fill(null),
     currentPickIndex: 0,
-    teamTokens,
     createdAt: new Date()
   };
 
@@ -78,14 +91,15 @@ async function createSession({ teamOrder, totalRounds, commissionerSecret }) {
   await draftCollection.deleteMany({});
   const result = await draftCollection.insertOne(doc);
 
-  return { draftId: result.insertedId.toString(), teamTokens };
+  return { draftId: result.insertedId.toString() };
 }
 
-async function submitPick({ team, token, player }) {
+async function submitPick({ team, password, player }) {
+  if (!checkTeamPassword(team, password)) throw fail("Incorrect team or password", 403);
+
   const doc = await draftCollection.find({}).sort({ createdAt: -1 }).limit(1).next();
 
   if (!doc) throw fail("No active draft", 404);
-  if (!team || !doc.teamTokens || doc.teamTokens[team] !== token) throw fail("Invalid team or token", 403);
   if (!player || !player.id || !player.name) throw fail("Invalid player payload", 400);
   if (doc.currentPickIndex >= doc.pickOrder.length) throw fail("Draft is already complete", 400);
 
@@ -127,4 +141,11 @@ async function resetSession({ commissionerSecret }) {
   await draftCollection.deleteMany({});
 }
 
-module.exports = { initDraftCollection, getCurrentSession, createSession, submitPick, resetSession };
+module.exports = {
+  initDraftCollection,
+  getCurrentSession,
+  verifyTeamLogin,
+  createSession,
+  submitPick,
+  resetSession
+};

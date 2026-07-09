@@ -7,6 +7,7 @@ const { getAvailability, saveAvailability } = require("./googleSheets");
 const {
   initDraftCollection,
   getCurrentSession,
+  verifyTeamLogin,
   createSession,
   submitPick,
   resetSession
@@ -214,10 +215,20 @@ app.post("/api/draft-session", async (req, res) => {
   }
 });
 
+app.post("/api/team-login", (req, res) => {
+  try {
+    const { team, password } = req.body;
+    const result = verifyTeamLogin({ team, password });
+    res.json(result);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to log in" });
+  }
+});
+
 app.post("/api/draft-session/pick", async (req, res) => {
   try {
-    const { team, token, player } = req.body;
-    const session = await submitPick({ team, token, player });
+    const { team, password, player } = req.body;
+    const session = await submitPick({ team, password, player });
     res.json(session);
   } catch (error) {
     console.error("Error submitting pick:", error);
