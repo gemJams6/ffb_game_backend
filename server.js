@@ -4,6 +4,13 @@ const express = require("express");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion } = require("mongodb");
 const { getAvailability, saveAvailability } = require("./googleSheets");
+const {
+  initDraftCollection,
+  getCurrentSession,
+  createSession,
+  submitPick,
+  resetSession
+} = require("./draftSession");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -186,6 +193,49 @@ app.post("/api/draft-availability", async (req, res) => {
   }
 });
 
+app.get("/api/draft-session", async (req, res) => {
+  try {
+    const session = await getCurrentSession();
+    res.json(session || { draftId: null });
+  } catch (error) {
+    console.error("Error loading draft session:", error);
+    res.status(500).json({ error: "Failed to load draft session" });
+  }
+});
+
+app.post("/api/draft-session", async (req, res) => {
+  try {
+    const { teamOrder, totalRounds, commissionerSecret } = req.body;
+    const result = await createSession({ teamOrder, totalRounds, commissionerSecret });
+    res.status(201).json(result);
+  } catch (error) {
+    console.error("Error creating draft session:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to create draft session" });
+  }
+});
+
+app.post("/api/draft-session/pick", async (req, res) => {
+  try {
+    const { team, token, player } = req.body;
+    const session = await submitPick({ team, token, player });
+    res.json(session);
+  } catch (error) {
+    console.error("Error submitting pick:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to submit pick" });
+  }
+});
+
+app.post("/api/draft-session/reset", async (req, res) => {
+  try {
+    const { commissionerSecret } = req.body;
+    await resetSession({ commissionerSecret });
+    res.json({ message: "Draft session reset" });
+  } catch (error) {
+    console.error("Error resetting draft session:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to reset draft session" });
+  }
+});
+
 async function startServer() {
   try {
     await client.connect();
@@ -193,6 +243,7 @@ async function startServer() {
 
     const db = client.db("ffb_game");
     leaderboardCollection = db.collection("leaderboard");
+    initDraftCollection(db);
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
