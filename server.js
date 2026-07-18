@@ -12,6 +12,7 @@ const {
   submitPick,
   resetSession
 } = require("./draftSession");
+const { initVotesCollection, getAllVotes, submitVote } = require("./votes");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -251,6 +252,27 @@ app.post("/api/draft-session/reset", async (req, res) => {
   }
 });
 
+app.get("/api/votes", async (req, res) => {
+  try {
+    const votes = await getAllVotes();
+    res.json(votes);
+  } catch (error) {
+    console.error("Error loading votes:", error);
+    res.status(500).json({ error: "Failed to load votes" });
+  }
+});
+
+app.post("/api/votes", async (req, res) => {
+  try {
+    const { ruleId, team, password, optionId } = req.body;
+    const result = await submitVote({ ruleId, team, password, optionId });
+    res.status(201).json(result);
+  } catch (error) {
+    console.error("Error submitting vote:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to submit vote" });
+  }
+});
+
 async function startServer() {
   try {
     await client.connect();
@@ -259,6 +281,7 @@ async function startServer() {
     const db = client.db("ffb_game");
     leaderboardCollection = db.collection("leaderboard");
     initDraftCollection(db);
+    initVotesCollection(db);
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
