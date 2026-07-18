@@ -4,10 +4,10 @@ const express = require("express");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion } = require("mongodb");
 const { getAvailability, saveAvailability } = require("./googleSheets");
+const { checkTeamPassword, verifyTeamLogin } = require("./teamAuth");
 const {
   initDraftCollection,
   getCurrentSession,
-  verifyTeamLogin,
   createSession,
   submitPick,
   resetSession
@@ -175,10 +175,14 @@ app.get("/api/draft-availability", async (req, res) => {
 
 app.post("/api/draft-availability", async (req, res) => {
   try {
-    const { player, values, note } = req.body;
+    const { player, password, values, note } = req.body;
 
     if (!player || typeof player !== "string") {
       return res.status(400).json({ error: "Player is required" });
+    }
+
+    if (!checkTeamPassword(player, password)) {
+      return res.status(403).json({ error: "Incorrect team or password" });
     }
 
     if (!Array.isArray(values)) {

@@ -1,27 +1,9 @@
+const { checkTeamPassword, verifyTeamLogin, fail } = require("./teamAuth");
+
 let draftCollection;
 
 function initDraftCollection(db) {
   draftCollection = db.collection("draft_sessions");
-}
-
-// Set once via the TEAM_PASSWORDS_JSON env var, e.g.
-// {"Dan":"eagles92","Grove":"...", ...} -- persistent across seasons/drafts,
-// unlike the old per-draft tokens. Parsed lazily so a malformed/missing env
-// var fails loudly at the point of use rather than crashing server startup.
-function getTeamPasswords() {
-  const raw = process.env.TEAM_PASSWORDS_JSON;
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    console.error("TEAM_PASSWORDS_JSON is not valid JSON:", err.message);
-    return {};
-  }
-}
-
-function checkTeamPassword(team, password) {
-  const passwords = getTeamPasswords();
-  return Boolean(team) && Boolean(password) && passwords[team] === password;
 }
 
 function buildPickOrder(teamOrder, totalRounds) {
@@ -33,12 +15,6 @@ function buildPickOrder(teamOrder, totalRounds) {
     });
   }
   return order;
-}
-
-function fail(message, statusCode) {
-  const err = new Error(message);
-  err.statusCode = statusCode;
-  return err;
 }
 
 // Rounds 1-6 get 5 minutes to pick; every round after that gets 3.
@@ -162,13 +138,6 @@ async function getCurrentSession() {
   const doc = await draftCollection.find({}).sort({ createdAt: -1 }).limit(1).next();
   const finalDoc = await autoPickIfExpired(doc);
   return toPublicSession(finalDoc);
-}
-
-function verifyTeamLogin({ team, password }) {
-  if (!checkTeamPassword(team, password)) {
-    throw fail("Incorrect team or password", 403);
-  }
-  return { ok: true };
 }
 
 async function createSession({ teamOrder, totalRounds, commissionerSecret }) {
