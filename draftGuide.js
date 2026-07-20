@@ -138,6 +138,23 @@ async function buildDraftGuideTable() {
     pickByPlayerId.set(pick.player_id, { round: pick.round, pickNo: pick.pick_no });
   });
 
+  // 2025 "ADP by position" proxy: FFC has no broader-market 2025 ADP (we
+  // checked -- it's a genuine gap in their archive, sandwiched between
+  // working 2023/2024/2026 snapshots), so this uses our own league's real
+  // 2025 draft order instead. Smaller sample (160 picks vs. thousands of
+  // mock drafts), but it's real data: 1st RB taken in that draft = RB1, etc.
+  const draftPositionRankByPlayerId = new Map();
+  const picksByPosition = {};
+  draftPicks.forEach((pick) => {
+    const pos = pick.metadata && pick.metadata.position;
+    if (!pos || !ALLOWED_POSITIONS.includes(pos)) return;
+    (picksByPosition[pos] = picksByPosition[pos] || []).push(pick);
+  });
+  Object.values(picksByPosition).forEach((picks) => {
+    picks.sort((a, b) => a.pick_no - b.pick_no);
+    picks.forEach((pick, i) => draftPositionRankByPlayerId.set(pick.player_id, i + 1));
+  });
+
   // Custom point totals under THIS league's own scoring_settings, not
   // generic PPR -- Sleeper's stat blob already pre-counts bonus thresholds
   // (e.g. "hit 100+ receiving yards in N games"), so this is a
@@ -152,9 +169,16 @@ async function buildDraftGuideTable() {
     if (total !== 0) totalsByPlayerId.set(playerId, Math.round(total * 100) / 100);
   });
 
+  // Finish rank is scoped to only players actually drafted in our 2025
+  // league (not the full ~225-deep NFL WR pool etc., which includes tons of
+  // waiver-wire/garbage-time scrubs) -- that keeps "finish position" and
+  // "draft position" comparable, both drawn from the same ~160-player pool,
+  // so a "drafted RB5, finished RB2" delta means the same kind of thing as
+  // a "drafted WR5, finished WR2" one.
   const positionGroups = {};
   Object.values(sleeperPlayers).forEach((p) => {
     if (!totalsByPlayerId.has(p.player_id) || !p.position) return;
+    if (!pickByPlayerId.has(p.player_id)) return;
     (positionGroups[p.position] = positionGroups[p.position] || []).push({
       playerId: p.player_id,
       total: totalsByPlayerId.get(p.player_id)
@@ -171,11 +195,32 @@ async function buildDraftGuideTable() {
   const sortedAdp = skillPlayers.slice().sort((a, b) => a.adp - b.adp);
   const withTiers = assignTiers(sortedAdp);
 
+  // 2026 ADP by position -- same idea as the finish-rank grouping above, but
+  // ranking this year's ADP within each position instead of last year's points.
+  const adpPositionGroups = {};
+  sortedAdp.forEach((p) => {
+    (adpPositionGroups[p.position] = adpPositionGroups[p.position] || []).push(p);
+  });
+  const adpPositionRankByName = new Map();
+  Object.values(adpPositionGroups).forEach((group) => {
+    group.forEach((p, i) => adpPositionRankByName.set(normalizeName(p.name), i + 1));
+  });
+
   return withTiers.map((p, i) => {
     const sleeperId = nameToSleeperId.get(normalizeName(p.name));
     const draftedInfo = sleeperId ? pickByPlayerId.get(sleeperId) : null;
     const points = sleeperId ? totalsByPlayerId.get(sleeperId) : undefined;
-    const posRank = sleeperId ? posRankByPlayerId.get(sleeperId) : undefined;
+    const finishPosRank = sleeperId ? posRankByPlayerId.get(sleeperId) : undefined;
+    const draftPosRank = sleeperId ? draftPositionRankByPlayerId.get(sleeperId) : undefined;
+    const adpPosRank = adpPositionRankByName.get(normalizeName(p.name));
+
+    // The "one useable number": how much better/worse a player finished
+    // than where our own league actually drafted them, by position, last
+    // year. Positive = outperformed their draft slot (value/breakout).
+    // Negative = underperformed (bust). Null if we're missing either half
+    // (e.g. wasn't drafted in that league, or didn't finish with any points).
+    const valueDeltaLastYear =
+      draftPosRank != null && finishPosRank != null ? draftPosRank - finishPosRank : null;
 
     return {
       rank: i + 1,
@@ -185,11 +230,14 @@ async function buildDraftGuideTable() {
       bye: p.bye,
       adp: p.adp,
       adpFormatted: p.adp_formatted,
+      adpPositionRank: adpPosRank ? `${p.position}${adpPosRank}` : null,
       tier: p.tier,
       volatility: volatilityLabel(p.stdev),
       draftedLastYear: draftedInfo ? `Rd ${draftedInfo.round}, Pick ${draftedInfo.pickNo}` : "Undrafted",
+      draftPositionRankLastYear: draftPosRank ? `${p.position}${draftPosRank}` : null,
       pointsLastYear: points != null ? points : null,
-      positionRankLastYear: posRank ? `${p.position}${posRank}` : null
+      positionRankLastYear: finishPosRank ? `${p.position}${finishPosRank}` : null,
+      valueDeltaLastYear
     };
   });
 }
