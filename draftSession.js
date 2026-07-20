@@ -1,4 +1,5 @@
 const { checkTeamPassword, verifyTeamLogin, fail } = require("./teamAuth");
+const { getRankedPlayerPool } = require("./playerPool");
 
 let draftCollection;
 
@@ -27,51 +28,9 @@ function deadlineForNextPick(pickOrder, pickIndex) {
   return nextSlot ? new Date(Date.now() + pickTimerMs(nextSlot.round)) : null;
 }
 
-/* ---------- Ranked player pool (server-side, for auto-picking on timeout) ----------
-   Mirrors the same Sleeper dataset/filtering/ranking the frontend uses, so an
-   auto-pick lands on the same "best available" player a human would see at
-   the top of their list. Cached in memory for a day, same as the frontend's
-   localStorage cache, since Sleeper asks apps not to hit this endpoint more
-   than once/day and this file is ~15MB. */
-
-const ALLOWED_POSITIONS = ["QB", "RB", "WR", "TE", "K", "DEF"];
-const PLAYER_POOL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-
-let cachedPlayerPool = null;
-let cachedPlayerPoolFetchedAt = 0;
-
-function normalizePosition(pos) {
-  return pos === "FB" ? "RB" : pos;
-}
-
-async function getRankedPlayerPool() {
-  if (cachedPlayerPool && Date.now() - cachedPlayerPoolFetchedAt < PLAYER_POOL_MAX_AGE_MS) {
-    return cachedPlayerPool;
-  }
-
-  const res = await fetch("https://api.sleeper.app/v1/players/nfl");
-  const data = await res.json();
-
-  const players = Object.values(data)
-    .filter((p) => {
-      const positions = p.fantasy_positions || [];
-      const isRelevant = positions.some((pos) => ALLOWED_POSITIONS.includes(normalizePosition(pos)) || pos === "FB");
-      const isActive = p.active === true || p.status === "Active";
-      return isRelevant && isActive && p.team;
-    })
-    .map((raw) => ({
-      id: raw.player_id,
-      name: raw.full_name || `${raw.first_name || ""} ${raw.last_name || ""}`.trim(),
-      position: normalizePosition(raw.position),
-      team: raw.team || "",
-      searchRank: typeof raw.search_rank === "number" ? raw.search_rank : 999999
-    }))
-    .sort((a, b) => a.searchRank - b.searchRank);
-
-  cachedPlayerPool = players;
-  cachedPlayerPoolFetchedAt = Date.now();
-  return players;
-}
+// Auto-picking (below) uses the same ranked pool (playerPool.js) as
+// draft-replica's displayed list, so an auto-pick always lands on whoever a
+// human would actually see at the top of their available-players table.
 
 function toPublicSession(doc) {
   if (!doc) return null;

@@ -7,17 +7,18 @@
 // Tiers and a volatility ("upside/bust" proxy) label are computed from FFC's
 // own numbers rather than copying anyone's proprietary ratings.
 
-const ADP_API_URL = "https://fantasyfootballcalculator.com/api/v1/adp/ppr?teams=10&year=2026&position=all";
-const SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl";
+const { getRawExternalData, normalizeName, buildNameToSleeperId } = require("./externalData");
+
 const LAST_YEAR_LEAGUE_ID = "1257201187006971904";
 const LAST_YEAR_DRAFT_ID = "1257201187015372800";
 const LAST_YEAR_SEASON = "2025";
 const ALLOWED_POSITIONS = ["QB", "RB", "WR", "TE", "K"];
 
 // Last year's picks/stats are finalized and never change; the ADP list is
-// the only part that updates (FFC says at most once/day) -- one shared
-// cache covering the whole joined table is simplest and matches their
-// "don't call too frequently" guidance.
+// the only part that updates (FFC says at most once/day) -- one cache
+// covering the whole joined table (on top of externalData's own cache for
+// the raw FFC/Sleeper fetch) avoids redoing the join/tier computation on
+// every request.
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 let cachedTable = null;
 let cachedAt = 0;
@@ -26,15 +27,6 @@ async function fetchJson(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Request to ${url} failed: ${res.status}`);
   return res.json();
-}
-
-function normalizeName(name) {
-  return (name || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9 ]/g, "")
-    .replace(/\b(jr|sr|ii|iii|iv|v)\b/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 // Our own tiers (not FantasyPros' proprietary ones), found via 1D k-means
@@ -112,26 +104,14 @@ function volatilityLabel(stdev) {
 }
 
 async function buildDraftGuideTable() {
-  const [adpData, sleeperPlayers, draftPicks, league] = await Promise.all([
-    fetchJson(ADP_API_URL),
-    fetchJson(SLEEPER_PLAYERS_URL),
+  const { adpData, sleeperPlayers } = await getRawExternalData();
+  const [draftPicks, league] = await Promise.all([
     fetchJson(`https://api.sleeper.app/v1/draft/${LAST_YEAR_DRAFT_ID}/picks`),
     fetchJson(`https://api.sleeper.app/v1/league/${LAST_YEAR_LEAGUE_ID}`)
   ]);
   const stats = await fetchJson(`https://api.sleeper.app/v1/stats/nfl/regular/${LAST_YEAR_SEASON}`);
 
-  // Sleeper's player pool includes retired/practice-squad/irrelevant-position
-  // players who can share a name with an active fantasy-relevant one (e.g.
-  // there's both an inactive Guard and the actual Bills QB named "Josh
-  // Allen"). Restricting the name lookup to active players in a fantasy
-  // position -- with a real team -- avoids silently matching the wrong one.
-  const nameToSleeperId = new Map();
-  Object.values(sleeperPlayers).forEach((p) => {
-    if (!p.active || !p.team || !ALLOWED_POSITIONS.includes(p.position)) return;
-    const fullName = p.full_name || (p.first_name && p.last_name ? `${p.first_name} ${p.last_name}` : "");
-    const key = normalizeName(fullName);
-    if (key && !nameToSleeperId.has(key)) nameToSleeperId.set(key, p.player_id);
-  });
+  const nameToSleeperId = buildNameToSleeperId(sleeperPlayers, ALLOWED_POSITIONS);
 
   const pickByPlayerId = new Map();
   draftPicks.forEach((pick) => {

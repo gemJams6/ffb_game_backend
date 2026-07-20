@@ -15,6 +15,7 @@ const {
 const { initVotesCollection, getAllVotes, submitVote } = require("./votes");
 const { initMessagesCollection, getMessages, postMessage } = require("./messages");
 const { getDraftGuideTable } = require("./draftGuide");
+const { getRankedPlayerPool } = require("./playerPool");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -304,6 +305,16 @@ app.get("/api/draft-guide", async (req, res) => {
   } catch (error) {
     console.error("Error loading draft guide:", error);
     res.status(500).json({ error: "Failed to load draft guide" });
+  }
+});
+
+app.get("/api/player-pool", async (req, res) => {
+  try {
+    const pool = await getRankedPlayerPool();
+    res.json(pool);
+  } catch (error) {
+    console.error("Error loading player pool:", error);
+    res.status(500).json({ error: "Failed to load player pool" });
   }
 });
 
