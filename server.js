@@ -14,6 +14,7 @@ const {
 } = require("./draftSession");
 const { initVotesCollection, getAllVotes, submitVote } = require("./votes");
 const { initMessagesCollection, getMessages, postMessage } = require("./messages");
+const { getDraftGuideTable } = require("./draftGuide");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -293,6 +294,16 @@ app.post("/api/messages", async (req, res) => {
   } catch (error) {
     console.error("Error posting message:", error);
     res.status(error.statusCode || 500).json({ error: error.message || "Failed to post message" });
+  }
+});
+
+app.get("/api/draft-guide", async (req, res) => {
+  try {
+    const table = await getDraftGuideTable();
+    res.json(table);
+  } catch (error) {
+    console.error("Error loading draft guide:", error);
+    res.status(500).json({ error: "Failed to load draft guide" });
   }
 });
 
