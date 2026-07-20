@@ -36,6 +36,7 @@ const client = new MongoClient(uri, {
 let leaderboardCollection;
 
 app.get("/health", (req, res) => {
+  console.log(`Health check ping at ${new Date().toISOString()}`);
   res.json({ ok: true });
 });
 
