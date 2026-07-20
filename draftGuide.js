@@ -140,9 +140,20 @@ async function buildDraftGuideTable() {
 
   const nameToSleeperId = buildNameToSleeperId(sleeperPlayers, ALLOWED_POSITIONS);
 
-  const pickByPlayerId = new Map();
+  // Positional draft rank from our own 2025 league draft (1st RB taken =
+  // RB1, etc.) -- shown under "Drafted (2025)" instead of the literal
+  // round/pick, since the position-rank framing is more directly
+  // comparable to the other position-rank columns in this table.
+  const draftPositionRankByPlayerId = new Map();
+  const picksByPosition = {};
   draftPicks.forEach((pick) => {
-    pickByPlayerId.set(pick.player_id, { round: pick.round, pickNo: pick.pick_no });
+    const pos = pick.metadata && pick.metadata.position;
+    if (!pos || !ALLOWED_POSITIONS.includes(pos)) return;
+    (picksByPosition[pos] = picksByPosition[pos] || []).push(pick);
+  });
+  Object.values(picksByPosition).forEach((picks) => {
+    picks.sort((a, b) => a.pick_no - b.pick_no);
+    picks.forEach((pick, i) => draftPositionRankByPlayerId.set(pick.player_id, i + 1));
   });
 
   // Custom point totals under THIS league's own scoring_settings, not
@@ -203,12 +214,15 @@ async function buildDraftGuideTable() {
     group.forEach((p, i) => adpPositionRankByName.set(normalizeName(p.name), i + 1));
   });
 
+  const VOLATILITY_ORDER = { Safe: 1, Moderate: 2, Volatile: 3, Unknown: 4 };
+
   return withTiers.map((p, i) => {
     const sleeperId = nameToSleeperId.get(normalizeName(p.name));
-    const draftedInfo = sleeperId ? pickByPlayerId.get(sleeperId) : null;
     const finishPosRank = sleeperId ? posRankByPlayerId.get(sleeperId) : undefined;
     const finishTier = sleeperId ? finishTierByPlayerId.get(sleeperId) : undefined;
+    const draftPosRank = sleeperId ? draftPositionRankByPlayerId.get(sleeperId) : undefined;
     const adpPosRank = adpPositionRankByName.get(normalizeName(p.name));
+    const volatility = volatilityLabel(p.stdev);
 
     // The "one useable number": 2026 ADP position rank vs. 2025 finish
     // position rank. Positive = they finished better last year than their
@@ -228,11 +242,16 @@ async function buildDraftGuideTable() {
       adp: p.adp,
       adpFormatted: p.adp_formatted,
       adpPositionRank: adpPosRank ? `${p.position}${adpPosRank}` : null,
+      adpPositionRankNum: adpPosRank ?? null,
       tier: p.tier,
-      volatility: volatilityLabel(p.stdev),
-      draftedLastYear: draftedInfo ? `Rd ${draftedInfo.round}, Pick ${draftedInfo.pickNo}` : "Undrafted",
+      volatility,
+      volatilityRank: VOLATILITY_ORDER[volatility],
+      draftedLastYear: draftPosRank ? `${p.position}${draftPosRank}` : "Undrafted",
+      draftedLastYearNum: draftPosRank ?? null,
       positionRankLastYear: finishPosRank ? `${p.position}${finishPosRank}` : null,
+      positionRankLastYearNum: finishPosRank ?? null,
       finishTierLastYear: finishTier ? `Tier ${finishTier}` : null,
+      finishTierLastYearNum: finishTier ?? null,
       finishVsAdpGap
     };
   });
