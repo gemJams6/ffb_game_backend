@@ -13,6 +13,7 @@ const {
   resetSession
 } = require("./draftSession");
 const { initVotesCollection, getAllVotes, submitVote } = require("./votes");
+const { initMessagesCollection, getMessages, postMessage } = require("./messages");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -274,6 +275,27 @@ app.post("/api/votes", async (req, res) => {
   }
 });
 
+app.get("/api/messages", async (req, res) => {
+  try {
+    const messages = await getMessages();
+    res.json(messages);
+  } catch (error) {
+    console.error("Error loading messages:", error);
+    res.status(500).json({ error: "Failed to load messages" });
+  }
+});
+
+app.post("/api/messages", async (req, res) => {
+  try {
+    const { username, password, content } = req.body;
+    const result = await postMessage({ username, password, content });
+    res.status(201).json(result);
+  } catch (error) {
+    console.error("Error posting message:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to post message" });
+  }
+});
+
 async function startServer() {
   try {
     await client.connect();
@@ -283,6 +305,7 @@ async function startServer() {
     leaderboardCollection = db.collection("leaderboard");
     initDraftCollection(db);
     initVotesCollection(db);
+    initMessagesCollection(db);
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
