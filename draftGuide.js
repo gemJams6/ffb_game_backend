@@ -71,26 +71,41 @@ function kmeans1D(values, k, iterations = 100) {
   return assignments;
 }
 
+// Tiers are computed separately within each position's own ADP range --
+// clustering across all positions at once lets whichever position is
+// drafted earliest (or most densely packed) dominate the low tier numbers,
+// which stops "Tier 1" from meaning anything within a given position.
 function assignTiers(sortedByAdp) {
-  const adpValues = sortedByAdp.map((p) => p.adp);
-  // Roughly one tier per ~8 players, floor of 8 tiers total, so tier count
-  // scales sensibly whether the list is 60 players or 250.
-  const tierCount = Math.max(8, Math.round(sortedByAdp.length / 8));
-  const clusterAssignments = kmeans1D(adpValues, tierCount);
-
-  // Cluster indices from k-means aren't necessarily in ADP order -- remap
-  // them to sequential tier numbers in the order they first appear (which,
-  // since clusters are contiguous for sorted 1D input, is the ADP order).
-  const clusterToTier = new Map();
-  let nextTier = 1;
-  return sortedByAdp.map((p, i) => {
-    const cluster = clusterAssignments[i];
-    if (!clusterToTier.has(cluster)) {
-      clusterToTier.set(cluster, nextTier);
-      nextTier++;
-    }
-    return { ...p, tier: clusterToTier.get(cluster) };
+  const tierByIndex = new Array(sortedByAdp.length);
+  const indicesByPosition = {};
+  sortedByAdp.forEach((p, i) => {
+    (indicesByPosition[p.position] = indicesByPosition[p.position] || []).push(i);
   });
+
+  Object.values(indicesByPosition).forEach((indices) => {
+    // indices are already in ascending-ADP order, since sortedByAdp itself
+    // is globally ADP-sorted and filtering preserves relative order.
+    const values = indices.map((i) => sortedByAdp[i].adp);
+    // Roughly one tier per ~6 players at this position, floor of 3 tiers,
+    // so shallow positions (K) still get a sensible tier count.
+    const tierCount = Math.max(3, Math.min(Math.round(indices.length / 6), indices.length));
+    const clusterAssignments = kmeans1D(values, tierCount);
+
+    // Cluster indices from k-means aren't necessarily in ADP order -- remap
+    // them to sequential tier numbers in the order they first appear (which,
+    // since clusters are contiguous for sorted 1D input, is the ADP order).
+    const clusterToTier = new Map();
+    let nextTier = 1;
+    clusterAssignments.forEach((cluster, j) => {
+      if (!clusterToTier.has(cluster)) {
+        clusterToTier.set(cluster, nextTier);
+        nextTier++;
+      }
+      tierByIndex[indices[j]] = clusterToTier.get(cluster);
+    });
+  });
+
+  return sortedByAdp.map((p, i) => ({ ...p, tier: tierByIndex[i] }));
 }
 
 // Same k-means idea as assignTiers, but per position on 2025 point totals
@@ -171,8 +186,13 @@ async function buildDraftGuideTable() {
     if (total !== 0) totalsByPlayerId.set(playerId, Math.round(total * 100) / 100);
   });
 
-  // Team defenses aren't individually ranked/tracked for this guide.
-  const skillPlayers = adpData.players.filter((p) => p.position !== "DEF");
+  // Team defenses aren't individually ranked/tracked for this guide. FFC
+  // labels kickers "PK" while Sleeper (and everything else in this file)
+  // uses "K" -- normalize here so position filtering/grouping is consistent
+  // downstream.
+  const skillPlayers = adpData.players
+    .filter((p) => p.position !== "DEF")
+    .map((p) => (p.position === "PK" ? { ...p, position: "K" } : p));
   const sortedAdp = skillPlayers.slice().sort((a, b) => a.adp - b.adp);
   const withTiers = assignTiers(sortedAdp);
 
