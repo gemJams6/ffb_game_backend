@@ -93,6 +93,33 @@ function assignTiers(sortedByAdp) {
   });
 }
 
+// Same k-means idea as assignTiers, but per position on 2025 point totals
+// instead of on ADP -- finds where a position's real scoring naturally
+// breaks into tiers (e.g. "the RB1-RB3 tier, then a real drop-off to
+// RB4-RB9"), independent of ADP entirely. Higher points is better, so
+// cluster on ascending totals (kmeans1D's contiguous-cluster guarantee
+// needs ascending 1D input) and then flip the tier numbering so the
+// highest-scoring cluster becomes Tier 1.
+function assignFinishTiersForPosition(entries) {
+  const ascending = entries.slice().sort((a, b) => a.total - b.total);
+  const values = ascending.map((e) => e.total);
+  const tierCount = Math.max(3, Math.min(Math.round(ascending.length / 6), ascending.length));
+  const assignments = kmeans1D(values, tierCount);
+
+  // Cluster ids appear in ascending-value order here (worst first); the
+  // last-appearing (best) cluster should become Tier 1, so reverse it.
+  const appearanceOrder = [];
+  assignments.forEach((c) => {
+    if (!appearanceOrder.includes(c)) appearanceOrder.push(c);
+  });
+  const clusterToTier = new Map();
+  appearanceOrder.forEach((c, idx) => clusterToTier.set(c, appearanceOrder.length - idx));
+
+  const tierByPlayerId = new Map();
+  ascending.forEach((entry, i) => tierByPlayerId.set(entry.playerId, clusterToTier.get(assignments[i])));
+  return tierByPlayerId;
+}
+
 // Our own "upside/bust" proxy computed from FFC's real draft-variance
 // numbers (stdev of where this player has actually been picked) -- not a
 // copy of anyone's proprietary star rating.
@@ -118,27 +145,11 @@ async function buildDraftGuideTable() {
     pickByPlayerId.set(pick.player_id, { round: pick.round, pickNo: pick.pick_no });
   });
 
-  // 2025 "ADP by position" proxy: FFC has no broader-market 2025 ADP (we
-  // checked -- it's a genuine gap in their archive, sandwiched between
-  // working 2023/2024/2026 snapshots), so this uses our own league's real
-  // 2025 draft order instead. Smaller sample (160 picks vs. thousands of
-  // mock drafts), but it's real data: 1st RB taken in that draft = RB1, etc.
-  const draftPositionRankByPlayerId = new Map();
-  const picksByPosition = {};
-  draftPicks.forEach((pick) => {
-    const pos = pick.metadata && pick.metadata.position;
-    if (!pos || !ALLOWED_POSITIONS.includes(pos)) return;
-    (picksByPosition[pos] = picksByPosition[pos] || []).push(pick);
-  });
-  Object.values(picksByPosition).forEach((picks) => {
-    picks.sort((a, b) => a.pick_no - b.pick_no);
-    picks.forEach((pick, i) => draftPositionRankByPlayerId.set(pick.player_id, i + 1));
-  });
-
   // Custom point totals under THIS league's own scoring_settings, not
   // generic PPR -- Sleeper's stat blob already pre-counts bonus thresholds
   // (e.g. "hit 100+ receiving yards in N games"), so this is a
-  // straightforward weighted sum, no special-casing needed.
+  // straightforward weighted sum, no special-casing needed. Points
+  // themselves aren't shown -- they're only used to rank/tier players.
   const scoringSettings = league.scoring_settings || {};
   const totalsByPlayerId = new Map();
   Object.entries(stats).forEach(([playerId, statLine]) => {
@@ -149,31 +160,37 @@ async function buildDraftGuideTable() {
     if (total !== 0) totalsByPlayerId.set(playerId, Math.round(total * 100) / 100);
   });
 
-  // Finish rank is scoped to only players actually drafted in our 2025
-  // league (not the full ~225-deep NFL WR pool etc., which includes tons of
-  // waiver-wire/garbage-time scrubs) -- that keeps "finish position" and
-  // "draft position" comparable, both drawn from the same ~160-player pool,
-  // so a "drafted RB5, finished RB2" delta means the same kind of thing as
-  // a "drafted WR5, finished WR2" one.
+  // Team defenses aren't individually ranked/tracked for this guide.
+  const skillPlayers = adpData.players.filter((p) => p.position !== "DEF");
+  const sortedAdp = skillPlayers.slice().sort((a, b) => a.adp - b.adp);
+  const withTiers = assignTiers(sortedAdp);
+
+  // "2025 finish" and "2026 ADP" are only directly comparable if both are
+  // ranked among the same player pool -- so finish rank is scoped to just
+  // the players in THIS year's ADP list (not our own 160-pick league draft,
+  // and not the full ~225-deep NFL WR pool full of waiver-wire scrubs).
+  const adpMatchedSleeperIds = new Set();
+  sortedAdp.forEach((p) => {
+    const id = nameToSleeperId.get(normalizeName(p.name));
+    if (id) adpMatchedSleeperIds.add(id);
+  });
+
   const positionGroups = {};
   Object.values(sleeperPlayers).forEach((p) => {
     if (!totalsByPlayerId.has(p.player_id) || !p.position) return;
-    if (!pickByPlayerId.has(p.player_id)) return;
+    if (!adpMatchedSleeperIds.has(p.player_id)) return;
     (positionGroups[p.position] = positionGroups[p.position] || []).push({
       playerId: p.player_id,
       total: totalsByPlayerId.get(p.player_id)
     });
   });
   const posRankByPlayerId = new Map();
+  const finishTierByPlayerId = new Map();
   Object.values(positionGroups).forEach((group) => {
     group.sort((a, b) => b.total - a.total);
     group.forEach((entry, i) => posRankByPlayerId.set(entry.playerId, i + 1));
+    assignFinishTiersForPosition(group).forEach((tier, playerId) => finishTierByPlayerId.set(playerId, tier));
   });
-
-  // Team defenses aren't individually ranked/tracked for this guide.
-  const skillPlayers = adpData.players.filter((p) => p.position !== "DEF");
-  const sortedAdp = skillPlayers.slice().sort((a, b) => a.adp - b.adp);
-  const withTiers = assignTiers(sortedAdp);
 
   // 2026 ADP by position -- same idea as the finish-rank grouping above, but
   // ranking this year's ADP within each position instead of last year's points.
@@ -189,18 +206,18 @@ async function buildDraftGuideTable() {
   return withTiers.map((p, i) => {
     const sleeperId = nameToSleeperId.get(normalizeName(p.name));
     const draftedInfo = sleeperId ? pickByPlayerId.get(sleeperId) : null;
-    const points = sleeperId ? totalsByPlayerId.get(sleeperId) : undefined;
     const finishPosRank = sleeperId ? posRankByPlayerId.get(sleeperId) : undefined;
-    const draftPosRank = sleeperId ? draftPositionRankByPlayerId.get(sleeperId) : undefined;
+    const finishTier = sleeperId ? finishTierByPlayerId.get(sleeperId) : undefined;
     const adpPosRank = adpPositionRankByName.get(normalizeName(p.name));
 
-    // The "one useable number": how much better/worse a player finished
-    // than where our own league actually drafted them, by position, last
-    // year. Positive = outperformed their draft slot (value/breakout).
-    // Negative = underperformed (bust). Null if we're missing either half
-    // (e.g. wasn't drafted in that league, or didn't finish with any points).
-    const valueDeltaLastYear =
-      draftPosRank != null && finishPosRank != null ? draftPosRank - finishPosRank : null;
+    // The "one useable number": 2026 ADP position rank vs. 2025 finish
+    // position rank. Positive = they finished better last year than their
+    // current ADP reflects (possible value/undervalued this year).
+    // Negative = current ADP has them rated higher than their actual 2025
+    // finish supports (possible overvalue/bust risk). Null if either half
+    // is missing (e.g. no 2025 finish data, like a rookie).
+    const finishVsAdpGap =
+      adpPosRank != null && finishPosRank != null ? adpPosRank - finishPosRank : null;
 
     return {
       rank: i + 1,
@@ -214,10 +231,9 @@ async function buildDraftGuideTable() {
       tier: p.tier,
       volatility: volatilityLabel(p.stdev),
       draftedLastYear: draftedInfo ? `Rd ${draftedInfo.round}, Pick ${draftedInfo.pickNo}` : "Undrafted",
-      draftPositionRankLastYear: draftPosRank ? `${p.position}${draftPosRank}` : null,
-      pointsLastYear: points != null ? points : null,
       positionRankLastYear: finishPosRank ? `${p.position}${finishPosRank}` : null,
-      valueDeltaLastYear
+      finishTierLastYear: finishTier ? `Tier ${finishTier}` : null,
+      finishVsAdpGap
     };
   });
 }
