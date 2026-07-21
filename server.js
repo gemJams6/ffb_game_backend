@@ -12,7 +12,7 @@ const {
   submitPick,
   resetSession
 } = require("./draftSession");
-const { initVotesCollection, getAllVotes, submitVote } = require("./votes");
+const { initVotesCollection, getAllVotes, submitVote, resetVotesForRule } = require("./votes");
 const { initMessagesCollection, getMessages, postMessage } = require("./messages");
 const { getDraftGuideTable } = require("./draftGuide");
 const { getRankedPlayerPool } = require("./playerPool");
@@ -274,6 +274,17 @@ app.post("/api/votes", async (req, res) => {
   } catch (error) {
     console.error("Error submitting vote:", error);
     res.status(error.statusCode || 500).json({ error: error.message || "Failed to submit vote" });
+  }
+});
+
+app.post("/api/votes/reset", async (req, res) => {
+  try {
+    const { ruleId, commissionerSecret } = req.body;
+    const result = await resetVotesForRule({ ruleId, commissionerSecret });
+    res.json(result);
+  } catch (error) {
+    console.error("Error resetting votes:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to reset votes" });
   }
 });
 

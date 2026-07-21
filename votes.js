@@ -43,4 +43,16 @@ async function submitVote({ ruleId, team, password, optionId }) {
   return { ok: true };
 }
 
-module.exports = { initVotesCollection, getAllVotes, submitVote };
+// Same commissioner-secret gate as draftSession's resetSession -- used when
+// a rule needs a revote (e.g. no majority, options got narrowed down).
+async function resetVotesForRule({ ruleId, commissionerSecret }) {
+  if (!process.env.COMMISSIONER_SECRET || commissionerSecret !== process.env.COMMISSIONER_SECRET) {
+    throw fail("Invalid commissioner secret", 403);
+  }
+  if (!ruleId || typeof ruleId !== "string") throw fail("ruleId is required", 400);
+
+  const result = await votesCollection.deleteMany({ ruleId });
+  return { ok: true, deletedCount: result.deletedCount };
+}
+
+module.exports = { initVotesCollection, getAllVotes, submitVote, resetVotesForRule };
