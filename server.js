@@ -13,6 +13,7 @@ const {
   resetSession
 } = require("./draftSession");
 const { initVotesCollection, getAllVotes, submitVote, resetVotesForRule } = require("./votes");
+const { initMovieNightCollection, getMovieNightState, spinMovieNight, submitRating } = require("./movieNight");
 const { initMessagesCollection, getMessages, postMessage } = require("./messages");
 const { getDraftGuideTable } = require("./draftGuide");
 const { getRankedPlayerPool } = require("./playerPool");
@@ -319,6 +320,38 @@ app.get("/api/draft-guide", async (req, res) => {
   }
 });
 
+app.get("/api/movie-night", async (req, res) => {
+  try {
+    const state = await getMovieNightState();
+    res.json(state);
+  } catch (error) {
+    console.error("Error loading movie night state:", error);
+    res.status(500).json({ error: "Failed to load movie night state" });
+  }
+});
+
+app.post("/api/movie-night/spin", async (req, res) => {
+  try {
+    const { team, password } = req.body;
+    const result = await spinMovieNight({ team, password });
+    res.status(201).json(result);
+  } catch (error) {
+    console.error("Error spinning movie night:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to spin" });
+  }
+});
+
+app.post("/api/movie-night/rate", async (req, res) => {
+  try {
+    const { team, password, number, rating } = req.body;
+    const result = await submitRating({ team, password, number, rating });
+    res.json(result);
+  } catch (error) {
+    console.error("Error submitting movie rating:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to submit rating" });
+  }
+});
+
 app.get("/api/player-pool", async (req, res) => {
   try {
     const pool = await getRankedPlayerPool();
@@ -339,6 +372,7 @@ async function startServer() {
     initDraftCollection(db);
     initVotesCollection(db);
     initMessagesCollection(db);
+    initMovieNightCollection(db);
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
