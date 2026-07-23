@@ -76,10 +76,14 @@ async function submitRating({ team, password, number, rating }) {
     throw fail("Rating must be between 1 and 10", 400);
   }
 
+  // Ratings support one decimal place (e.g. 7.5) -- round off any float
+  // noise from the client so stored/displayed values stay clean.
+  const cleanRating = Math.round(rating * 10) / 10;
+
   const doc = await movieNightCollection.findOne({ number });
   if (!doc) throw fail("No movie night found for that number", 404);
 
-  await movieNightCollection.updateOne({ number }, { $set: { [`ratings.${team}`]: rating } });
+  await movieNightCollection.updateOne({ number }, { $set: { [`ratings.${team}`]: cleanRating } });
 
   const updated = await movieNightCollection.findOne({ number });
   if (isComplete(updated) && !updated.completedAt) {
@@ -89,4 +93,26 @@ async function submitRating({ team, password, number, rating }) {
   return { ok: true };
 }
 
-module.exports = { initMovieNightCollection, getMovieNightState, spinMovieNight, submitRating };
+// Cancels whatever movie is currently "in play" (not yet fully rated) and
+// frees its number back into the draw pool -- for a mis-spin or a pick
+// nobody wants to commit to. Only ever touches the current incomplete doc;
+// completed (history) entries are untouchable through this.
+async function resetCurrentSpin({ team, password }) {
+  if (!checkTeamPassword(team, password)) throw fail("Incorrect login", 403);
+  if (!RATERS.includes(team)) throw fail("Only Dan and Danielle can reset the spin", 403);
+
+  const docs = await movieNightCollection.find({}).toArray();
+  const current = docs.find((d) => !isComplete(d));
+  if (!current) throw fail("No spin in progress to reset", 404);
+
+  await movieNightCollection.deleteOne({ number: current.number });
+  return { ok: true, number: current.number };
+}
+
+module.exports = {
+  initMovieNightCollection,
+  getMovieNightState,
+  spinMovieNight,
+  submitRating,
+  resetCurrentSpin
+};

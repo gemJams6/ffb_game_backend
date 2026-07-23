@@ -13,7 +13,13 @@ const {
   resetSession
 } = require("./draftSession");
 const { initVotesCollection, getAllVotes, submitVote, resetVotesForRule } = require("./votes");
-const { initMovieNightCollection, getMovieNightState, spinMovieNight, submitRating } = require("./movieNight");
+const {
+  initMovieNightCollection,
+  getMovieNightState,
+  spinMovieNight,
+  submitRating,
+  resetCurrentSpin
+} = require("./movieNight");
 const { initMessagesCollection, getMessages, postMessage } = require("./messages");
 const { getDraftGuideTable } = require("./draftGuide");
 const { getRankedPlayerPool } = require("./playerPool");
@@ -349,6 +355,17 @@ app.post("/api/movie-night/rate", async (req, res) => {
   } catch (error) {
     console.error("Error submitting movie rating:", error);
     res.status(error.statusCode || 500).json({ error: error.message || "Failed to submit rating" });
+  }
+});
+
+app.post("/api/movie-night/reset", async (req, res) => {
+  try {
+    const { team, password } = req.body;
+    const result = await resetCurrentSpin({ team, password });
+    res.json(result);
+  } catch (error) {
+    console.error("Error resetting movie night spin:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to reset spin" });
   }
 });
 
