@@ -18,7 +18,8 @@ const {
   getMovieNightState,
   spinMovieNight,
   submitRating,
-  resetCurrentSpin
+  resetCurrentSpin,
+  resetAllMovieNights
 } = require("./movieNight");
 const { initMessagesCollection, getMessages, postMessage } = require("./messages");
 const { getDraftGuideTable } = require("./draftGuide");
@@ -366,6 +367,17 @@ app.post("/api/movie-night/reset", async (req, res) => {
   } catch (error) {
     console.error("Error resetting movie night spin:", error);
     res.status(error.statusCode || 500).json({ error: error.message || "Failed to reset spin" });
+  }
+});
+
+app.post("/api/movie-night/reset-all", async (req, res) => {
+  try {
+    const { team, password } = req.body;
+    const result = await resetAllMovieNights({ team, password });
+    res.json(result);
+  } catch (error) {
+    console.error("Error resetting all movie nights:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to reset everything" });
   }
 });
 

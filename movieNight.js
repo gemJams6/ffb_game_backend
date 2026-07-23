@@ -109,10 +109,23 @@ async function resetCurrentSpin({ team, password }) {
   return { ok: true, number: current.number };
 }
 
+// Wipes every movie night -- used pool, current pick, and history -- back to
+// a blank slate. Dan-only (not Danielle): his own real team password is the
+// gate, same as any other write here, just restricted to one of the two
+// names instead of both.
+async function resetAllMovieNights({ team, password }) {
+  if (!checkTeamPassword(team, password)) throw fail("Incorrect login", 403);
+  if (team !== "Dan") throw fail("Only Dan can reset everything", 403);
+
+  const result = await movieNightCollection.deleteMany({});
+  return { ok: true, deletedCount: result.deletedCount };
+}
+
 module.exports = {
   initMovieNightCollection,
   getMovieNightState,
   spinMovieNight,
   submitRating,
-  resetCurrentSpin
+  resetCurrentSpin,
+  resetAllMovieNights
 };
