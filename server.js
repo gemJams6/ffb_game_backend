@@ -22,6 +22,12 @@ const {
   resetAllMovieNights
 } = require("./movieNight");
 const { initMessagesCollection, getMessages, postMessage } = require("./messages");
+const {
+  initDraftOrderCollection,
+  getDraftOrderState,
+  selectSlot,
+  resetDraftOrder
+} = require("./draftOrder");
 const { getDraftGuideTable } = require("./draftGuide");
 const { getRankedPlayerPool } = require("./playerPool");
 
@@ -381,6 +387,38 @@ app.post("/api/movie-night/reset-all", async (req, res) => {
   }
 });
 
+app.get("/api/draft-order", async (req, res) => {
+  try {
+    const state = await getDraftOrderState();
+    res.json(state);
+  } catch (error) {
+    console.error("Error loading draft order state:", error);
+    res.status(500).json({ error: "Failed to load draft order" });
+  }
+});
+
+app.post("/api/draft-order/select", async (req, res) => {
+  try {
+    const { team, password, slot } = req.body;
+    const result = await selectSlot({ team, password, slot });
+    res.json(result);
+  } catch (error) {
+    console.error("Error selecting draft order slot:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to select slot" });
+  }
+});
+
+app.post("/api/draft-order/reset", async (req, res) => {
+  try {
+    const { commissionerSecret } = req.body;
+    await resetDraftOrder({ commissionerSecret });
+    res.json({ message: "Draft order reset" });
+  } catch (error) {
+    console.error("Error resetting draft order:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to reset draft order" });
+  }
+});
+
 app.get("/api/player-pool", async (req, res) => {
   try {
     const pool = await getRankedPlayerPool();
@@ -402,6 +440,7 @@ async function startServer() {
     initVotesCollection(db);
     initMessagesCollection(db);
     initMovieNightCollection(db);
+    initDraftOrderCollection(db);
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
