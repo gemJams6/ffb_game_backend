@@ -102,10 +102,12 @@ async function submitRating({ team, password, number, rating }) {
 // Cancels whatever movie is currently "in play" (not yet fully rated) and
 // frees its number back into the draw pool -- for a mis-spin or a pick
 // nobody wants to commit to. Only ever touches the current incomplete doc;
-// completed (history) entries are untouchable through this.
+// completed (history) entries are untouchable through this. Dan-only, same
+// as resetAllMovieNights below -- everyone can spin/rate, but only Dan can
+// undo a spin.
 async function resetCurrentSpin({ team, password }) {
   if (!checkTeamPassword(team, password)) throw fail("Incorrect login", 403);
-  if (!RATERS.includes(team)) throw fail(`Only ${RATERS.join(", ")} can reset the spin`, 403);
+  if (team !== "Dan") throw fail("Only Dan can reset the spin", 403);
 
   const docs = await movieNightCollection.find({}).toArray();
   const current = docs.find((d) => !d.completedAt);
