@@ -1,11 +1,11 @@
-// Movie Date Night: a random-draw mechanism over IMDb Top 250 ranks (1-250),
-// shared between just Dan and Danielle (not the 10 fantasy teams). One
-// number is "in play" at a time -- once both people have rated it, it's
-// archived to history and permanently retired from the draw pool.
+// IMDb 250: a random-draw mechanism over IMDb Top 250 ranks (1-250), shared
+// between Dan, Danielle, Jake, and Madison (not the 10 fantasy teams). One
+// number is "in play" at a time -- once everyone has rated it, it's archived
+// to history and permanently retired from the draw pool.
 
 const { checkTeamPassword } = require("./teamAuth");
 
-const RATERS = ["Dan", "Danielle"];
+const RATERS = ["Dan", "Danielle", "Jake", "Madison"];
 const MAX_NUMBER = 250;
 
 let movieNightCollection;
@@ -23,15 +23,21 @@ function fail(message, statusCode) {
   return err;
 }
 
-function isComplete(doc) {
+// Whether a doc currently has a rating from everyone in RATERS -- only used
+// to decide whether to *newly* stamp completedAt in submitRating. Whether a
+// doc is actually archived to history is decided by completedAt itself (see
+// below), not by re-running this check -- otherwise growing RATERS later
+// would retroactively un-complete old history entries that were finished
+// under a smaller roster.
+function meetsAllCurrentRaters(doc) {
   return RATERS.every((name) => doc.ratings && typeof doc.ratings[name] === "number");
 }
 
 async function getMovieNightState() {
   const docs = await movieNightCollection.find({}).sort({ spunAt: 1 }).toArray();
   const usedNumbers = docs.map((d) => d.number);
-  const current = docs.find((d) => !isComplete(d)) || null;
-  const history = docs.filter((d) => isComplete(d));
+  const current = docs.find((d) => !d.completedAt) || null;
+  const history = docs.filter((d) => d.completedAt);
 
   return {
     usedNumbers,
@@ -42,10 +48,10 @@ async function getMovieNightState() {
 
 async function spinMovieNight({ team, password }) {
   if (!checkTeamPassword(team, password)) throw fail("Incorrect login", 403);
-  if (!RATERS.includes(team)) throw fail("Only Dan and Danielle can spin", 403);
+  if (!RATERS.includes(team)) throw fail(`Only ${RATERS.join(", ")} can spin`, 403);
 
   const docs = await movieNightCollection.find({}).toArray();
-  if (docs.some((d) => !isComplete(d))) {
+  if (docs.some((d) => !d.completedAt)) {
     throw fail("Finish rating the current movie before spinning again", 409);
   }
 
@@ -70,7 +76,7 @@ async function spinMovieNight({ team, password }) {
 
 async function submitRating({ team, password, number, rating }) {
   if (!checkTeamPassword(team, password)) throw fail("Incorrect login", 403);
-  if (!RATERS.includes(team)) throw fail("Only Dan and Danielle can rate", 403);
+  if (!RATERS.includes(team)) throw fail(`Only ${RATERS.join(", ")} can rate`, 403);
   if (typeof number !== "number") throw fail("number is required", 400);
   if (typeof rating !== "number" || rating < 1 || rating > 10) {
     throw fail("Rating must be between 1 and 10", 400);
@@ -86,7 +92,7 @@ async function submitRating({ team, password, number, rating }) {
   await movieNightCollection.updateOne({ number }, { $set: { [`ratings.${team}`]: cleanRating } });
 
   const updated = await movieNightCollection.findOne({ number });
-  if (isComplete(updated) && !updated.completedAt) {
+  if (meetsAllCurrentRaters(updated) && !updated.completedAt) {
     await movieNightCollection.updateOne({ number }, { $set: { completedAt: new Date() } });
   }
 
@@ -99,10 +105,10 @@ async function submitRating({ team, password, number, rating }) {
 // completed (history) entries are untouchable through this.
 async function resetCurrentSpin({ team, password }) {
   if (!checkTeamPassword(team, password)) throw fail("Incorrect login", 403);
-  if (!RATERS.includes(team)) throw fail("Only Dan and Danielle can reset the spin", 403);
+  if (!RATERS.includes(team)) throw fail(`Only ${RATERS.join(", ")} can reset the spin`, 403);
 
   const docs = await movieNightCollection.find({}).toArray();
-  const current = docs.find((d) => !isComplete(d));
+  const current = docs.find((d) => !d.completedAt);
   if (!current) throw fail("No spin in progress to reset", 404);
 
   await movieNightCollection.deleteOne({ number: current.number });
@@ -110,9 +116,8 @@ async function resetCurrentSpin({ team, password }) {
 }
 
 // Wipes every movie night -- used pool, current pick, and history -- back to
-// a blank slate. Dan-only (not Danielle): his own real team password is the
-// gate, same as any other write here, just restricted to one of the two
-// names instead of both.
+// a blank slate. Dan-only: his own real team password is the gate, same as
+// any other write here, just restricted to one of the four names.
 async function resetAllMovieNights({ team, password }) {
   if (!checkTeamPassword(team, password)) throw fail("Incorrect login", 403);
   if (team !== "Dan") throw fail("Only Dan can reset everything", 403);
