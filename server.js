@@ -18,6 +18,7 @@ const {
   getMovieNightState,
   spinMovieNight,
   submitRating,
+  skipRater,
   resetCurrentSpin,
   resetAllMovieNights
 } = require("./movieNight");
@@ -362,6 +363,17 @@ app.post("/api/movie-night/rate", async (req, res) => {
   } catch (error) {
     console.error("Error submitting movie rating:", error);
     res.status(error.statusCode || 500).json({ error: error.message || "Failed to submit rating" });
+  }
+});
+
+app.post("/api/movie-night/skip", async (req, res) => {
+  try {
+    const { team, password, number, skippedTeam } = req.body;
+    const result = await skipRater({ team, password, number, skippedTeam });
+    res.json(result);
+  } catch (error) {
+    console.error("Error skipping rater:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to skip rater" });
   }
 });
 

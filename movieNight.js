@@ -23,14 +23,17 @@ function fail(message, statusCode) {
   return err;
 }
 
-// Whether a doc currently has a rating from everyone in RATERS -- only used
-// to decide whether to *newly* stamp completedAt in submitRating. Whether a
-// doc is actually archived to history is decided by completedAt itself (see
-// below), not by re-running this check -- otherwise growing RATERS later
-// would retroactively un-complete old history entries that were finished
-// under a smaller roster.
+// Whether a doc currently has a rating -- or a Dan-issued skip -- covering
+// everyone in RATERS. Only used to decide whether to *newly* stamp
+// completedAt in submitRating/skipRater. Whether a doc is actually archived
+// to history is decided by completedAt itself (see below), not by re-running
+// this check -- otherwise growing RATERS later would retroactively
+// un-complete old history entries that were finished under a smaller roster.
 function meetsAllCurrentRaters(doc) {
-  return RATERS.every((name) => doc.ratings && typeof doc.ratings[name] === "number");
+  return RATERS.every((name) => {
+    if (doc.ratings && typeof doc.ratings[name] === "number") return true;
+    return Boolean(doc.skipped && doc.skipped[name]);
+  });
 }
 
 async function getMovieNightState() {
@@ -41,8 +44,13 @@ async function getMovieNightState() {
 
   return {
     usedNumbers,
-    current: current ? { number: current.number, ratings: current.ratings || {} } : null,
-    history: history.map((d) => ({ number: d.number, ratings: d.ratings, completedAt: d.completedAt }))
+    current: current ? { number: current.number, ratings: current.ratings || {}, skipped: current.skipped || {} } : null,
+    history: history.map((d) => ({
+      number: d.number,
+      ratings: d.ratings,
+      skipped: d.skipped || {},
+      completedAt: d.completedAt
+    }))
   };
 }
 
@@ -89,7 +97,39 @@ async function submitRating({ team, password, number, rating }) {
   const doc = await movieNightCollection.findOne({ number });
   if (!doc) throw fail("No movie night found for that number", 404);
 
-  await movieNightCollection.updateOne({ number }, { $set: { [`ratings.${team}`]: cleanRating } });
+  // A real rating always supersedes a prior skip -- e.g. someone Dan skipped
+  // ends up watching it after all, so their actual score should count, even
+  // on an already-archived (history) entry.
+  await movieNightCollection.updateOne(
+    { number },
+    { $set: { [`ratings.${team}`]: cleanRating }, $unset: { [`skipped.${team}`]: "" } }
+  );
+
+  const updated = await movieNightCollection.findOne({ number });
+  if (meetsAllCurrentRaters(updated) && !updated.completedAt) {
+    await movieNightCollection.updateOne({ number }, { $set: { completedAt: new Date() } });
+  }
+
+  return { ok: true };
+}
+
+// Dan-only: marks a rater as skipped for a specific movie (e.g. they didn't
+// watch it), so the pick can still complete/archive without waiting on them
+// forever. A skip isn't final -- if that person later submits a real rating
+// (submitRating, above), it overrides the skip automatically.
+async function skipRater({ team, password, number, skippedTeam }) {
+  if (!checkTeamPassword(team, password)) throw fail("Incorrect login", 403);
+  if (team !== "Dan") throw fail("Only Dan can skip a rater", 403);
+  if (!RATERS.includes(skippedTeam)) throw fail(`${skippedTeam} is not a rater`, 400);
+  if (typeof number !== "number") throw fail("number is required", 400);
+
+  const doc = await movieNightCollection.findOne({ number });
+  if (!doc) throw fail("No movie night found for that number", 404);
+  if (doc.ratings && typeof doc.ratings[skippedTeam] === "number") {
+    throw fail(`${skippedTeam} already has a real rating -- nothing to skip`, 409);
+  }
+
+  await movieNightCollection.updateOne({ number }, { $set: { [`skipped.${skippedTeam}`]: true } });
 
   const updated = await movieNightCollection.findOne({ number });
   if (meetsAllCurrentRaters(updated) && !updated.completedAt) {
@@ -133,6 +173,7 @@ module.exports = {
   getMovieNightState,
   spinMovieNight,
   submitRating,
+  skipRater,
   resetCurrentSpin,
   resetAllMovieNights
 };
