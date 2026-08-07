@@ -27,6 +27,7 @@ const {
   compositeKey,
   buildPositionRankObservations,
   fitPositionCurve,
+  evaluateCurve,
   fitStdevFallbackModel,
   estimateStdev,
   createRng,
@@ -87,6 +88,7 @@ async function buildDraftGuideTable() {
 
     // Curve: preseason position-rank -> actual PPG, from 2022-2025.
     const { observations } = buildPositionRankObservations(historicalSeasons, position);
+    const historicalObservationCount = observations.length;
     const deepestHistorical = observations.reduce((m, o) => Math.max(m, o.positionRank), 0);
     const deepestConsensus = players.reduce((m, p) => Math.max(m, p.positionRank || 0), 0);
     const maxRank = Math.max(deepestHistorical, deepestConsensus, 1);
@@ -134,6 +136,10 @@ async function buildDraftGuideTable() {
       best.fit,
       playerSamples.map(({ p, fullSamples }) => ({ id: p.rank, samples: fullSamples }))
     );
+    // Tier N (1-indexed) is the Nth-highest-mean component -- same ordering
+    // assignPlayerTiers itself uses internally -- so this lets us report
+    // "your tier's average" without re-exporting that internal mapping.
+    const tierAverages = best.fit.means.slice().sort((a, b) => b - a);
 
     playerSamples.forEach(({ p, spread, fullSamples }) => {
       const sorted = fullSamples.slice().sort((a, b) => a - b);
@@ -155,11 +161,15 @@ async function buildDraftGuideTable() {
         spreadSource: spread.source,
         volatility,
         volatilityRank: VOLATILITY_ORDER[volatility],
+        curvePpg: Math.round(evaluateCurve(curve, p.positionRank) * 10) / 10,
+        historicalObservationCount,
         projectedPpgMean: Math.round(mean * 10) / 10,
         projectedPpgLow: Math.round(percentile(sorted, 0.1) * 10) / 10,
         projectedPpgHigh: Math.round(percentile(sorted, 0.9) * 10) / 10,
         tier: tierInfo ? tierInfo.tier : null,
-        tierConfidence: tierInfo ? Math.round(tierInfo.confidence * 100) : null
+        tierConfidence: tierInfo ? Math.round(tierInfo.confidence * 100) : null,
+        tierAveragePpg: tierInfo ? Math.round(tierAverages[tierInfo.tier - 1] * 10) / 10 : null,
+        tierCount: best.fit.means.length
       });
     });
   });
