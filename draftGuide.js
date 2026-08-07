@@ -1,143 +1,51 @@
-// Builds a draft-prep table by joining three free, public data sources:
-//   - Fantasy Football Calculator's ADP API (crowdsourced average draft
-//     position from real mock drafts) -- see help.fantasyfootballcalculator.com,
-//     free for personal/commercial use with attribution.
-//   - Sleeper's player pool, last year's draft picks, and last year's raw
-//     season stats -- all public, no auth required.
-// Tiers and a volatility ("upside/bust" proxy) label are computed from FFC's
-// own numbers rather than copying anyone's proprietary ratings.
+// Builds the draft guide table via rank-distribution-overlap tiering:
+//   - Spine: a 517-player 2026 consensus ranking list (the user's own
+//     FantasyPros export).
+//   - Each player's preseason position-rank is modeled as a *distribution*
+//     (mean = consensus rank, spread = FFC's real draft-variance stdev,
+//     estimated via a fitted fallback where FFC doesn't cover that deep).
+//   - A "preseason position-rank -> actual PPG" curve, built from 2022-2025
+//     real season results (PFR data, the user's own sheet) joined against
+//     each of those years' own preseason FFC ADP -- never that season's
+//     finish-rank, which would bias the curve toward the players who
+//     broke out from a much lower preseason rank.
+//   - Each player's rank distribution is Monte Carlo-sampled through the
+//     curve to get a distribution of expected PPG, and a Gaussian Mixture
+//     Model (per position) finds where players' distributions actually
+//     stop overlapping -- that's what defines a tier.
+//
+// PFR's historical fantasy tables have no kicker or team-defense data at
+// all, so K and DST can't go through this methodology -- both are excluded
+// from this guide entirely (DST always was; K is new to exclude, forced by
+// data availability, not a choice).
 
-const { getRawExternalData, normalizeName, buildNameToSleeperId } = require("./externalData");
+const { getRawExternalData, normalizePosition } = require("./externalData");
+const { getDraftGuideRawData } = require("./draftGuideData");
+const {
+  PER_PLAYER_SAMPLE_COUNT,
+  POOL_SAMPLE_COUNT_PER_PLAYER,
+  compositeKey,
+  buildPositionRankObservations,
+  fitPositionCurve,
+  fitStdevFallbackModel,
+  estimateStdev,
+  createRng,
+  samplePlayerPpg,
+  selectBestGMM,
+  assignPlayerTiers
+} = require("./draftGuideCurve");
 
-const LAST_YEAR_LEAGUE_ID = "1257201187006971904";
-const LAST_YEAR_DRAFT_ID = "1257201187015372800";
-const LAST_YEAR_SEASON = "2025";
-const ALLOWED_POSITIONS = ["QB", "RB", "WR", "TE", "K"];
+const ALLOWED_POSITIONS = ["QB", "RB", "WR", "TE"];
+const VOLATILITY_ORDER = { Safe: 1, Moderate: 2, Volatile: 3, Unknown: 4 };
 
-// Last year's picks/stats are finalized and never change; the ADP list is
-// the only part that updates (FFC says at most once/day) -- one cache
-// covering the whole joined table (on top of externalData's own cache for
-// the raw FFC/Sleeper fetch) avoids redoing the join/tier computation on
-// every request.
+// Fixed (not day-bucketed) -- reproducible across runs/cache-refreshes, not
+// just stable within one, so results are diffable when debugging.
+const RNG_SEED = 20260101;
+
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 let cachedTable = null;
 let cachedAt = 0;
 
-async function fetchJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Request to ${url} failed: ${res.status}`);
-  return res.json();
-}
-
-// Our own tiers (not FantasyPros' proprietary ones), found via 1D k-means
-// clustering on ADP -- a standard way to find natural groupings in a
-// numeric distribution, rather than a hand-tuned gap threshold (which we
-// tried twice and both times mis-calibrated badly across the ADP range).
-// For sorted 1D data, k-means clusters are always contiguous intervals, so
-// this safely produces ordered, non-overlapping tiers.
-function kmeans1D(values, k, iterations = 100) {
-  const min = values[0];
-  const max = values[values.length - 1];
-  let centroids = Array.from({ length: k }, (_, i) => min + ((max - min) * i) / (k - 1));
-  let assignments = new Array(values.length).fill(0);
-
-  for (let iter = 0; iter < iterations; iter++) {
-    let changed = false;
-    for (let i = 0; i < values.length; i++) {
-      let bestCluster = 0;
-      let bestDist = Infinity;
-      for (let c = 0; c < k; c++) {
-        const dist = Math.abs(values[i] - centroids[c]);
-        if (dist < bestDist) {
-          bestDist = dist;
-          bestCluster = c;
-        }
-      }
-      if (assignments[i] !== bestCluster) changed = true;
-      assignments[i] = bestCluster;
-    }
-
-    const sums = new Array(k).fill(0);
-    const counts = new Array(k).fill(0);
-    for (let i = 0; i < values.length; i++) {
-      sums[assignments[i]] += values[i];
-      counts[assignments[i]]++;
-    }
-    centroids = sums.map((s, c) => (counts[c] ? s / counts[c] : centroids[c]));
-
-    if (!changed) break;
-  }
-
-  return assignments;
-}
-
-// Tiers are computed separately within each position's own ADP range --
-// clustering across all positions at once lets whichever position is
-// drafted earliest (or most densely packed) dominate the low tier numbers,
-// which stops "Tier 1" from meaning anything within a given position.
-function assignTiers(sortedByAdp) {
-  const tierByIndex = new Array(sortedByAdp.length);
-  const indicesByPosition = {};
-  sortedByAdp.forEach((p, i) => {
-    (indicesByPosition[p.position] = indicesByPosition[p.position] || []).push(i);
-  });
-
-  Object.values(indicesByPosition).forEach((indices) => {
-    // indices are already in ascending-ADP order, since sortedByAdp itself
-    // is globally ADP-sorted and filtering preserves relative order.
-    const values = indices.map((i) => sortedByAdp[i].adp);
-    // Roughly one tier per ~6 players at this position, floor of 3 tiers,
-    // so shallow positions (K) still get a sensible tier count.
-    const tierCount = Math.max(3, Math.min(Math.round(indices.length / 6), indices.length));
-    const clusterAssignments = kmeans1D(values, tierCount);
-
-    // Cluster indices from k-means aren't necessarily in ADP order -- remap
-    // them to sequential tier numbers in the order they first appear (which,
-    // since clusters are contiguous for sorted 1D input, is the ADP order).
-    const clusterToTier = new Map();
-    let nextTier = 1;
-    clusterAssignments.forEach((cluster, j) => {
-      if (!clusterToTier.has(cluster)) {
-        clusterToTier.set(cluster, nextTier);
-        nextTier++;
-      }
-      tierByIndex[indices[j]] = clusterToTier.get(cluster);
-    });
-  });
-
-  return sortedByAdp.map((p, i) => ({ ...p, tier: tierByIndex[i] }));
-}
-
-// Same k-means idea as assignTiers, but per position on 2025 point totals
-// instead of on ADP -- finds where a position's real scoring naturally
-// breaks into tiers (e.g. "the RB1-RB3 tier, then a real drop-off to
-// RB4-RB9"), independent of ADP entirely. Higher points is better, so
-// cluster on ascending totals (kmeans1D's contiguous-cluster guarantee
-// needs ascending 1D input) and then flip the tier numbering so the
-// highest-scoring cluster becomes Tier 1.
-function assignFinishTiersForPosition(entries) {
-  const ascending = entries.slice().sort((a, b) => a.total - b.total);
-  const values = ascending.map((e) => e.total);
-  const tierCount = Math.max(3, Math.min(Math.round(ascending.length / 6), ascending.length));
-  const assignments = kmeans1D(values, tierCount);
-
-  // Cluster ids appear in ascending-value order here (worst first); the
-  // last-appearing (best) cluster should become Tier 1, so reverse it.
-  const appearanceOrder = [];
-  assignments.forEach((c) => {
-    if (!appearanceOrder.includes(c)) appearanceOrder.push(c);
-  });
-  const clusterToTier = new Map();
-  appearanceOrder.forEach((c, idx) => clusterToTier.set(c, appearanceOrder.length - idx));
-
-  const tierByPlayerId = new Map();
-  ascending.forEach((entry, i) => tierByPlayerId.set(entry.playerId, clusterToTier.get(assignments[i])));
-  return tierByPlayerId;
-}
-
-// Our own "upside/bust" proxy computed from FFC's real draft-variance
-// numbers (stdev of where this player has actually been picked) -- not a
-// copy of anyone's proprietary star rating.
 function volatilityLabel(stdev) {
   if (stdev == null) return "Unknown";
   if (stdev <= 3) return "Safe";
@@ -145,136 +53,134 @@ function volatilityLabel(stdev) {
   return "Volatile";
 }
 
+function percentile(sortedValues, p) {
+  const idx = Math.min(sortedValues.length - 1, Math.max(0, Math.round(p * (sortedValues.length - 1))));
+  return sortedValues[idx];
+}
+
 async function buildDraftGuideTable() {
-  const { adpData, sleeperPlayers } = await getRawExternalData();
-  const [draftPicks, league] = await Promise.all([
-    fetchJson(`https://api.sleeper.app/v1/draft/${LAST_YEAR_DRAFT_ID}/picks`),
-    fetchJson(`https://api.sleeper.app/v1/league/${LAST_YEAR_LEAGUE_ID}`)
+  const [{ adpData: adp2026 }, { consensus, historicalSeasons }] = await Promise.all([
+    getRawExternalData(),
+    getDraftGuideRawData()
   ]);
-  const stats = await fetchJson(`https://api.sleeper.app/v1/stats/nfl/regular/${LAST_YEAR_SEASON}`);
 
-  const nameToSleeperId = buildNameToSleeperId(sleeperPlayers, ALLOWED_POSITIONS);
+  const rng = createRng(RNG_SEED);
 
-  // Positional draft rank from our own 2025 league draft (1st RB taken =
-  // RB1, etc.) -- shown under "Drafted (2025)" instead of the literal
-  // round/pick, since the position-rank framing is more directly
-  // comparable to the other position-rank columns in this table.
-  const draftPositionRankByPlayerId = new Map();
-  const picksByPosition = {};
-  draftPicks.forEach((pick) => {
-    const pos = pick.metadata && pick.metadata.position;
-    if (!pos || !ALLOWED_POSITIONS.includes(pos)) return;
-    (picksByPosition[pos] = picksByPosition[pos] || []).push(pick);
-  });
-  Object.values(picksByPosition).forEach((picks) => {
-    picks.sort((a, b) => a.pick_no - b.pick_no);
-    picks.forEach((pick, i) => draftPositionRankByPlayerId.set(pick.player_id, i + 1));
+  const ffc2026ByKey = new Map();
+  adp2026.players.forEach((p) => {
+    const key = compositeKey(p.name, p.position);
+    if (!ffc2026ByKey.has(key)) ffc2026ByKey.set(key, p);
   });
 
-  // Custom point totals under THIS league's own scoring_settings, not
-  // generic PPR -- Sleeper's stat blob already pre-counts bonus thresholds
-  // (e.g. "hit 100+ receiving yards in N games"), so this is a
-  // straightforward weighted sum, no special-casing needed. Points
-  // themselves aren't shown -- they're only used to rank/tier players.
-  const scoringSettings = league.scoring_settings || {};
-  const totalsByPlayerId = new Map();
-  Object.entries(stats).forEach(([playerId, statLine]) => {
-    let total = 0;
-    Object.entries(scoringSettings).forEach(([key, value]) => {
-      if (statLine[key]) total += statLine[key] * value;
+  const consensusByPosition = {};
+  consensus.forEach((p) => {
+    const pos = normalizePosition(p.position);
+    if (!ALLOWED_POSITIONS.includes(pos)) return;
+    (consensusByPosition[pos] = consensusByPosition[pos] || []).push(p);
+  });
+
+  const rowsByRank = new Map();
+
+  ALLOWED_POSITIONS.forEach((position) => {
+    const players = consensusByPosition[position] || [];
+    if (!players.length) return;
+
+    // Curve: preseason position-rank -> actual PPG, from 2022-2025.
+    const { observations } = buildPositionRankObservations(historicalSeasons, position);
+    const deepestHistorical = observations.reduce((m, o) => Math.max(m, o.positionRank), 0);
+    const deepestConsensus = players.reduce((m, p) => Math.max(m, p.positionRank || 0), 0);
+    const maxRank = Math.max(deepestHistorical, deepestConsensus, 1);
+    const curve = fitPositionCurve(observations, maxRank);
+
+    // Spread: real 2026 FFC stdev where matched; log-linear fallback fit
+    // (on this position's own matched players) for the deep tail FFC
+    // doesn't cover.
+    const matchedForModel = [];
+    const spreadByRank = new Map();
+    players.forEach((p) => {
+      const ffc = ffc2026ByKey.get(compositeKey(p.name, p.position));
+      if (ffc && typeof ffc.stdev === "number") {
+        spreadByRank.set(p.rank, { stdev: ffc.stdev, source: "ffc" });
+        matchedForModel.push({ positionRank: p.positionRank, stdev: ffc.stdev });
+      }
     });
-    if (total !== 0) totalsByPlayerId.set(playerId, Math.round(total * 100) / 100);
-  });
 
-  // Team defenses aren't individually ranked/tracked for this guide. FFC
-  // labels kickers "PK" while Sleeper (and everything else in this file)
-  // uses "K" -- normalize here so position filtering/grouping is consistent
-  // downstream.
-  const skillPlayers = adpData.players
-    .filter((p) => p.position !== "DEF")
-    .map((p) => (p.position === "PK" ? { ...p, position: "K" } : p));
-  const sortedAdp = skillPlayers.slice().sort((a, b) => a.adp - b.adp);
-  const withTiers = assignTiers(sortedAdp);
+    const stdevModel = matchedForModel.length >= 5 ? fitStdevFallbackModel(matchedForModel) : null;
+    const fallbackMeanStdev = matchedForModel.length
+      ? matchedForModel.reduce((s, m) => s + m.stdev, 0) / matchedForModel.length
+      : 3; // no FFC coverage at all for this position -- arbitrary last resort, documented here
 
-  // "2025 finish" and "2026 ADP" are only directly comparable if both are
-  // ranked among the same player pool -- so finish rank is scoped to just
-  // the players in THIS year's ADP list (not our own 160-pick league draft,
-  // and not the full ~225-deep NFL WR pool full of waiver-wire scrubs).
-  const adpMatchedSleeperIds = new Set();
-  sortedAdp.forEach((p) => {
-    const id = nameToSleeperId.get(normalizeName(p.name));
-    if (id) adpMatchedSleeperIds.add(id);
-  });
+    players.forEach((p) => {
+      if (!spreadByRank.has(p.rank)) {
+        const stdev = stdevModel ? estimateStdev(stdevModel, p.positionRank) : fallbackMeanStdev;
+        spreadByRank.set(p.rank, { stdev, source: "estimated" });
+      }
+    });
 
-  const positionGroups = {};
-  Object.values(sleeperPlayers).forEach((p) => {
-    if (!totalsByPlayerId.has(p.player_id) || !p.position) return;
-    if (!adpMatchedSleeperIds.has(p.player_id)) return;
-    (positionGroups[p.position] = positionGroups[p.position] || []).push({
-      playerId: p.player_id,
-      total: totalsByPlayerId.get(p.player_id)
+    // Sample every player: a full set for their own tier-confidence
+    // average, plus a smaller subsample pooled across the position to keep
+    // the GMM fit tractable.
+    const playerSamples = [];
+    const pooledForGmm = [];
+    players.forEach((p) => {
+      const spread = spreadByRank.get(p.rank);
+      const fullSamples = samplePlayerPpg(curve, p.positionRank, spread.stdev, rng, PER_PLAYER_SAMPLE_COUNT);
+      pooledForGmm.push(...fullSamples.slice(0, POOL_SAMPLE_COUNT_PER_PLAYER));
+      playerSamples.push({ p, spread, fullSamples });
+    });
+
+    const { best } = selectBestGMM(pooledForGmm);
+    const tierMap = assignPlayerTiers(
+      best.fit,
+      playerSamples.map(({ p, fullSamples }) => ({ id: p.rank, samples: fullSamples }))
+    );
+
+    playerSamples.forEach(({ p, spread, fullSamples }) => {
+      const sorted = fullSamples.slice().sort((a, b) => a - b);
+      const mean = fullSamples.reduce((s, v) => s + v, 0) / fullSamples.length;
+      const tierInfo = tierMap.get(p.rank);
+      const volatility = volatilityLabel(spread.stdev);
+
+      rowsByRank.set(p.rank, {
+        rank: p.rank,
+        name: p.name,
+        position,
+        team: p.team,
+        bye: p.bye,
+        adp: null,
+        adpFormatted: null,
+        consensusPositionRank: p.positionRank,
+        consensusPositionRankLabel: p.positionRank ? `${position}${p.positionRank}` : null,
+        spreadStdev: Math.round(spread.stdev * 100) / 100,
+        spreadSource: spread.source,
+        volatility,
+        volatilityRank: VOLATILITY_ORDER[volatility],
+        projectedPpgMean: Math.round(mean * 10) / 10,
+        projectedPpgLow: Math.round(percentile(sorted, 0.1) * 10) / 10,
+        projectedPpgHigh: Math.round(percentile(sorted, 0.9) * 10) / 10,
+        tier: tierInfo ? tierInfo.tier : null,
+        tierConfidence: tierInfo ? Math.round(tierInfo.confidence * 100) : null
+      });
     });
   });
-  const posRankByPlayerId = new Map();
-  const finishTierByPlayerId = new Map();
-  Object.values(positionGroups).forEach((group) => {
-    group.sort((a, b) => b.total - a.total);
-    group.forEach((entry, i) => posRankByPlayerId.set(entry.playerId, i + 1));
-    assignFinishTiersForPosition(group).forEach((tier, playerId) => finishTierByPlayerId.set(playerId, tier));
+
+  // Real ADP is a reference field only (not the ranking spine anymore) --
+  // fill it in wherever a 2026 FFC match exists, null otherwise (~268/517
+  // of the full consensus list won't have one; the frontend renders "—").
+  rowsByRank.forEach((row) => {
+    const ffc = ffc2026ByKey.get(compositeKey(row.name, row.position));
+    if (ffc) {
+      row.adp = ffc.adp;
+      row.adpFormatted = ffc.adp_formatted;
+    }
   });
 
-  // 2026 ADP by position -- same idea as the finish-rank grouping above, but
-  // ranking this year's ADP within each position instead of last year's points.
-  const adpPositionGroups = {};
-  sortedAdp.forEach((p) => {
-    (adpPositionGroups[p.position] = adpPositionGroups[p.position] || []).push(p);
-  });
-  const adpPositionRankByName = new Map();
-  Object.values(adpPositionGroups).forEach((group) => {
-    group.forEach((p, i) => adpPositionRankByName.set(normalizeName(p.name), i + 1));
-  });
-
-  const VOLATILITY_ORDER = { Safe: 1, Moderate: 2, Volatile: 3, Unknown: 4 };
-
-  return withTiers.map((p, i) => {
-    const sleeperId = nameToSleeperId.get(normalizeName(p.name));
-    const finishPosRank = sleeperId ? posRankByPlayerId.get(sleeperId) : undefined;
-    const finishTier = sleeperId ? finishTierByPlayerId.get(sleeperId) : undefined;
-    const draftPosRank = sleeperId ? draftPositionRankByPlayerId.get(sleeperId) : undefined;
-    const adpPosRank = adpPositionRankByName.get(normalizeName(p.name));
-    const volatility = volatilityLabel(p.stdev);
-
-    // The "one useable number": 2026 ADP position rank vs. 2025 finish
-    // position rank. Positive = they finished better last year than their
-    // current ADP reflects (possible value/undervalued this year).
-    // Negative = current ADP has them rated higher than their actual 2025
-    // finish supports (possible overvalue/bust risk). Null if either half
-    // is missing (e.g. no 2025 finish data, like a rookie).
-    const finishVsAdpGap =
-      adpPosRank != null && finishPosRank != null ? adpPosRank - finishPosRank : null;
-
-    return {
-      rank: i + 1,
-      name: p.name,
-      position: p.position,
-      team: p.team,
-      bye: p.bye,
-      adp: p.adp,
-      adpFormatted: p.adp_formatted,
-      adpPositionRank: adpPosRank ? `${p.position}${adpPosRank}` : null,
-      adpPositionRankNum: adpPosRank ?? null,
-      tier: p.tier,
-      volatility,
-      volatilityRank: VOLATILITY_ORDER[volatility],
-      draftedLastYear: draftPosRank ? `${p.position}${draftPosRank}` : "Undrafted",
-      draftedLastYearNum: draftPosRank ?? null,
-      positionRankLastYear: finishPosRank ? `${p.position}${finishPosRank}` : null,
-      positionRankLastYearNum: finishPosRank ?? null,
-      finishTierLastYear: finishTier ? `Tier ${finishTier}` : null,
-      finishTierLastYearNum: finishTier ?? null,
-      finishVsAdpGap
-    };
-  });
+  // Renumber 1..N over just the QB/RB/WR/TE rows (K/DST excluded), same
+  // convention the old ADP-based table used (contiguous rank within the
+  // relevant pool, not the original consensus list's numbering with gaps).
+  return Array.from(rowsByRank.values())
+    .sort((a, b) => a.rank - b.rank)
+    .map((row, i) => ({ ...row, rank: i + 1 }));
 }
 
 async function getDraftGuideTable() {
@@ -293,4 +199,4 @@ async function getDraftGuideTable() {
   }
 }
 
-module.exports = { getDraftGuideTable };
+module.exports = { getDraftGuideTable, buildDraftGuideTable };

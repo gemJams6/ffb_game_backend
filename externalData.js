@@ -38,6 +38,16 @@ async function getRawExternalData() {
   }
 }
 
+// Different sources spell the same position differently (FFC uses "PK" for
+// kickers where everything else here uses "K"; fullbacks show up as "FB" in
+// some feeds but count as "RB" for fantasy purposes) -- one shared mapping
+// so every join across sources agrees on position labels.
+function normalizePosition(position) {
+  if (position === "PK") return "K";
+  if (position === "FB") return "RB";
+  return position;
+}
+
 function normalizeName(name) {
   return (name || "")
     .toLowerCase()
@@ -65,4 +75,4 @@ function buildNameToSleeperId(sleeperPlayers, allowedPositions) {
   return map;
 }
 
-module.exports = { getRawExternalData, normalizeName, buildNameToSleeperId };
+module.exports = { getRawExternalData, normalizeName, normalizePosition, buildNameToSleeperId };
