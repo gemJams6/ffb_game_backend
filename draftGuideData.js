@@ -1,5 +1,5 @@
 // Raw-data layer for the draft guide's historical rank->points curve, plus
-// the 2026 consensus ranking list that's the guide's spine. Two source
+// the 2026 consensus ranking list that's the guide's spine. Three source
 // families:
 //   - The user's own Google Sheet (public "anyone with the link" CSV
 //     export, no auth needed): a 2026 consensus list, and one tab per
@@ -8,6 +8,14 @@
 //     side of each historical season (2022-2025 here; 2026 itself is
 //     already fetched/cached by externalData.js and shared with
 //     playerPool.js, so it's deliberately NOT re-fetched here).
+//   - Sleeper's per-season stats API, last 3 completed seasons, for each
+//     player's actual PPR finish (points + position rank) -- purely a
+//     reference display ("where did this guy actually finish the last few
+//     years") alongside the model's tier, NOT an input to the curve/tiering
+//     math itself. Feeding finish-rank into the ranking model was
+//     deliberately avoided elsewhere in this pipeline (order-statistic
+//     bias -- see draftGuideCurve.js) and that stays true; this is just
+//     context for the human reading the breakdown panel.
 // These sources are all functionally frozen (historical) or rarely
 // re-exported (the 2026 list), so this uses a much longer cache than the
 // live ADP/player-pool data.
@@ -22,6 +30,12 @@ const HISTORICAL_GIDS = {
 };
 const HISTORICAL_YEARS = [2022, 2023, 2024, 2025];
 
+// Last 3 completed seasons -- matches what Sleeper's own player-page
+// "Career" table shows, and is a separate, shorter window than the curve's
+// 4-year HISTORICAL_YEARS above (that one's driven by how many years of PFR
+// data the user's sheet has; this one's just "recent finishes for context").
+const SLEEPER_FINISH_YEARS = [2023, 2024, 2025];
+
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 let cached = null;
 let cachedAt = 0;
@@ -32,6 +46,10 @@ function sheetCsvUrl(gid) {
 
 function ffcAdpUrl(year) {
   return `https://fantasyfootballcalculator.com/api/v1/adp/ppr?teams=10&year=${year}&position=all`;
+}
+
+function sleeperStatsUrl(year) {
+  return `https://api.sleeper.app/stats/nfl/${year}?season_type=regular`;
 }
 
 async function fetchCsv(url) {
@@ -138,15 +156,36 @@ function parseHistoricalCsv(text, year) {
     }));
 }
 
+// Sleeper's season-stats response is a flat array, one entry per
+// player-season, with the fields we want nested under `.stats` and
+// `.player_id` at the top level. Keep only players who actually have a PPR
+// finish computed (bench/practice-squad entries carry no pos_rank_ppr) --
+// { playerId -> { position, positionRank, points } }.
+function parseSleeperFinishes(records) {
+  const byPlayerId = new Map();
+  records.forEach((rec) => {
+    const posRank = rec.stats && rec.stats.pos_rank_ppr;
+    const pts = rec.stats && rec.stats.pts_ppr;
+    if (posRank == null || pts == null || !rec.player_id) return;
+    byPlayerId.set(rec.player_id, {
+      position: rec.player && rec.player.position,
+      positionRank: posRank,
+      points: pts
+    });
+  });
+  return byPlayerId;
+}
+
 async function getDraftGuideRawData() {
   const isStale = !cached || Date.now() - cachedAt >= CACHE_MAX_AGE_MS;
   if (!isStale) return cached;
 
   try {
-    const [consensusCsvText, historicalCsvTexts, historicalAdpJsons] = await Promise.all([
+    const [consensusCsvText, historicalCsvTexts, historicalAdpJsons, sleeperFinishJsons] = await Promise.all([
       fetchCsv(sheetCsvUrl(CONSENSUS_GID)),
       Promise.all(HISTORICAL_YEARS.map((y) => fetchCsv(sheetCsvUrl(HISTORICAL_GIDS[y])))),
-      Promise.all(HISTORICAL_YEARS.map((y) => fetchJson(ffcAdpUrl(y))))
+      Promise.all(HISTORICAL_YEARS.map((y) => fetchJson(ffcAdpUrl(y)))),
+      Promise.all(SLEEPER_FINISH_YEARS.map((y) => fetchJson(sleeperStatsUrl(y))))
     ]);
 
     const consensus = parseConsensusCsv(consensusCsvText);
@@ -159,7 +198,12 @@ async function getDraftGuideRawData() {
       };
     });
 
-    cached = { consensus, historicalSeasons };
+    const sleeperFinishesByYear = {};
+    SLEEPER_FINISH_YEARS.forEach((year, i) => {
+      sleeperFinishesByYear[year] = parseSleeperFinishes(sleeperFinishJsons[i]);
+    });
+
+    cached = { consensus, historicalSeasons, sleeperFinishesByYear };
     cachedAt = Date.now();
     return cached;
   } catch (err) {
@@ -169,4 +213,4 @@ async function getDraftGuideRawData() {
   }
 }
 
-module.exports = { getDraftGuideRawData, HISTORICAL_YEARS };
+module.exports = { getDraftGuideRawData, HISTORICAL_YEARS, SLEEPER_FINISH_YEARS };

@@ -19,8 +19,8 @@
 // from this guide entirely (DST always was; K is new to exclude, forced by
 // data availability, not a choice).
 
-const { getRawExternalData, normalizePosition } = require("./externalData");
-const { getDraftGuideRawData } = require("./draftGuideData");
+const { getRawExternalData, normalizePosition, normalizeName, buildNameToSleeperId } = require("./externalData");
+const { getDraftGuideRawData, SLEEPER_FINISH_YEARS } = require("./draftGuideData");
 const {
   PER_PLAYER_SAMPLE_COUNT,
   POOL_SAMPLE_COUNT_PER_PLAYER,
@@ -60,10 +60,15 @@ function percentile(sortedValues, p) {
 }
 
 async function buildDraftGuideTable() {
-  const [{ adpData: adp2026 }, { consensus, historicalSeasons }] = await Promise.all([
+  const [{ adpData: adp2026, sleeperPlayers }, { consensus, historicalSeasons, sleeperFinishesByYear }] = await Promise.all([
     getRawExternalData(),
     getDraftGuideRawData()
   ]);
+
+  // Sleeper player_id, purely to look up recent real finishes for the
+  // breakdown panel's reference display -- not used anywhere in the
+  // curve/tiering math itself.
+  const nameToSleeperId = buildNameToSleeperId(sleeperPlayers, ALLOWED_POSITIONS);
 
   const rng = createRng(RNG_SEED);
 
@@ -183,6 +188,19 @@ async function buildDraftGuideTable() {
       row.adp = ffc.adp;
       row.adpFormatted = ffc.adp_formatted;
     }
+
+    // Recent real finishes (most recent year first) -- reference only, see
+    // note above. Rookies/unmatched names just get an empty array; the
+    // frontend shows a "no history" message rather than treating it as an error.
+    const sleeperId = nameToSleeperId.get(normalizeName(row.name));
+    row.recentFinishes = sleeperId
+      ? SLEEPER_FINISH_YEARS.slice().reverse()
+          .map((year) => {
+            const finish = sleeperFinishesByYear[year] && sleeperFinishesByYear[year].get(sleeperId);
+            return finish ? { year, position: finish.position, positionRank: finish.positionRank, points: finish.points } : null;
+          })
+          .filter(Boolean)
+      : [];
   });
 
   // Renumber 1..N over just the QB/RB/WR/TE rows (K/DST excluded), same

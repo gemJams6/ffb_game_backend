@@ -5,8 +5,8 @@
 // Prints diagnostics at every stage so a bad curve fit, a broken join, or a
 // degenerate GMM shows up here -- before ever touching the live server.
 
-const { getRawExternalData, normalizePosition } = require("../externalData");
-const { getDraftGuideRawData } = require("../draftGuideData");
+const { getRawExternalData, normalizePosition, normalizeName, buildNameToSleeperId } = require("../externalData");
+const { getDraftGuideRawData, SLEEPER_FINISH_YEARS } = require("../draftGuideData");
 const {
   PER_PLAYER_SAMPLE_COUNT,
   POOL_SAMPLE_COUNT_PER_PLAYER,
@@ -33,7 +33,7 @@ function section(title) {
 async function main() {
   section("1. FETCH LAYER");
   const t0 = Date.now();
-  const [{ adpData: adp2026 }, { consensus, historicalSeasons }] = await Promise.all([
+  const [{ adpData: adp2026, sleeperPlayers }, { consensus, historicalSeasons, sleeperFinishesByYear }] = await Promise.all([
     getRawExternalData(),
     getDraftGuideRawData()
   ]);
@@ -42,6 +42,9 @@ async function main() {
   console.log(`2026 FFC ADP: ${adp2026.players.length} players`);
   Object.entries(historicalSeasons).forEach(([year, s]) => {
     console.log(`  ${year}: PFR ${s.pfr.length} rows, FFC ADP ${s.ffcAdp.length} players`);
+  });
+  SLEEPER_FINISH_YEARS.forEach((year) => {
+    console.log(`  Sleeper ${year} finishes: ${sleeperFinishesByYear[year].size} players with a computed PPR position rank`);
   });
 
   const consensusPositionCounts = {};
@@ -193,6 +196,34 @@ async function main() {
       console.log(`  tier=${info.tier}, confidence=${(info.confidence * 100).toFixed(0)}%`);
     });
   }
+
+  section("6. SLEEPER RECENT-FINISH REFERENCE DATA (display-only, not model input)");
+  const nameToSleeperId = buildNameToSleeperId(sleeperPlayers, ALLOWED_POSITIONS);
+  let matchedAny = 0;
+  let totalConsensus = 0;
+  ALLOWED_POSITIONS.forEach((position) => {
+    (consensusByPosition[position] || []).forEach((p) => {
+      totalConsensus++;
+      const sleeperId = nameToSleeperId.get(normalizeName(p.name));
+      const hasAnyFinish = sleeperId && SLEEPER_FINISH_YEARS.some((y) => sleeperFinishesByYear[y].has(sleeperId));
+      if (hasAnyFinish) matchedAny++;
+    });
+  });
+  console.log(`Consensus players (QB/RB/WR/TE) with at least one matched Sleeper finish year: ${matchedAny}/${totalConsensus}`);
+
+  const finishSpotCheckNames = ["Bijan Robinson", "Ja'Marr Chase"];
+  finishSpotCheckNames.forEach((name) => {
+    const sleeperId = nameToSleeperId.get(normalizeName(name));
+    if (!sleeperId) {
+      console.log(`\n${name}: no Sleeper ID match`);
+      return;
+    }
+    console.log(`\n${name} (sleeperId=${sleeperId}):`);
+    SLEEPER_FINISH_YEARS.slice().reverse().forEach((year) => {
+      const finish = sleeperFinishesByYear[year].get(sleeperId);
+      console.log(finish ? `  ${year}: ${finish.position}${finish.positionRank}, ${finish.points} pts` : `  ${year}: no finish data`);
+    });
+  });
 
   console.log("\nDone.");
 }
