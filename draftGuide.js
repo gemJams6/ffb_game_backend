@@ -197,7 +197,16 @@ async function buildDraftGuideTable() {
       ? SLEEPER_FINISH_YEARS.slice().reverse()
           .map((year) => {
             const finish = sleeperFinishesByYear[year] && sleeperFinishesByYear[year].get(sleeperId);
-            return finish ? { year, position: finish.position, positionRank: finish.positionRank, points: finish.points } : null;
+            if (!finish) return null;
+            const ppg = finish.gamesPlayed > 0 ? Math.round((finish.points / finish.gamesPlayed) * 10) / 10 : null;
+            return {
+              year,
+              position: finish.position,
+              positionRank: finish.positionRank,
+              points: finish.points,
+              gamesPlayed: finish.gamesPlayed,
+              ppg
+            };
           })
           .filter(Boolean)
       : [];

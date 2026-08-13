@@ -160,7 +160,9 @@ function parseHistoricalCsv(text, year) {
 // player-season, with the fields we want nested under `.stats` and
 // `.player_id` at the top level. Keep only players who actually have a PPR
 // finish computed (bench/practice-squad entries carry no pos_rank_ppr) --
-// { playerId -> { position, positionRank, points } }.
+// { playerId -> { position, positionRank, points, gamesPlayed } }. PPG
+// itself is derived downstream in draftGuide.js (this layer stays a
+// faithful raw transcription), same convention as the PFR season totals.
 function parseSleeperFinishes(records) {
   const byPlayerId = new Map();
   records.forEach((rec) => {
@@ -170,7 +172,8 @@ function parseSleeperFinishes(records) {
     byPlayerId.set(rec.player_id, {
       position: rec.player && rec.player.position,
       positionRank: posRank,
-      points: pts
+      points: pts,
+      gamesPlayed: (rec.stats && rec.stats.gp) || 0
     });
   });
   return byPlayerId;

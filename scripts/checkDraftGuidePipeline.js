@@ -221,7 +221,9 @@ async function main() {
     console.log(`\n${name} (sleeperId=${sleeperId}):`);
     SLEEPER_FINISH_YEARS.slice().reverse().forEach((year) => {
       const finish = sleeperFinishesByYear[year].get(sleeperId);
-      console.log(finish ? `  ${year}: ${finish.position}${finish.positionRank}, ${finish.points} pts` : `  ${year}: no finish data`);
+      if (!finish) { console.log(`  ${year}: no finish data`); return; }
+      const ppg = finish.gamesPlayed > 0 ? (finish.points / finish.gamesPlayed).toFixed(1) : "n/a";
+      console.log(`  ${year}: ${finish.position}${finish.positionRank}, ${finish.points} pts over ${finish.gamesPlayed} games (${ppg} PPG)`);
     });
   });
 
