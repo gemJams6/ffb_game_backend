@@ -31,6 +31,11 @@ const {
 } = require("./draftOrder");
 const { getDraftGuideTable } = require("./draftGuide");
 const { getRankedPlayerPool } = require("./playerPool");
+const {
+  initNewEraCalculatorCollection,
+  getCalculatorState,
+  saveCalculatorState
+} = require("./newEraCalculator");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -441,6 +446,27 @@ app.get("/api/player-pool", async (req, res) => {
   }
 });
 
+app.get("/api/new-era-calculator", async (req, res) => {
+  try {
+    const state = await getCalculatorState();
+    res.json({ state });
+  } catch (error) {
+    console.error("Error loading new era calculator state:", error);
+    res.status(500).json({ error: "Failed to load calculator state" });
+  }
+});
+
+app.post("/api/new-era-calculator", async (req, res) => {
+  try {
+    const { team, password, state } = req.body;
+    const saved = await saveCalculatorState({ team, password, state });
+    res.json({ state: saved });
+  } catch (error) {
+    console.error("Error saving new era calculator state:", error);
+    res.status(error.statusCode || 500).json({ error: error.message || "Failed to save calculator state" });
+  }
+});
+
 async function startServer() {
   try {
     await client.connect();
@@ -453,6 +479,7 @@ async function startServer() {
     initMessagesCollection(db);
     initMovieNightCollection(db);
     initDraftOrderCollection(db);
+    initNewEraCalculatorCollection(db);
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
